@@ -121,6 +121,10 @@ export function createEmptyBuilder(
   };
 }
 
+export function cloneBuilderState(builder: BuilderState): BuilderState {
+  return JSON.parse(JSON.stringify(builder)) as BuilderState;
+}
+
 export interface AuthOwnerRef {
   type: "collection" | "folder";
   id: string;
@@ -206,6 +210,17 @@ export function getEnvironmentVariableKeys(environment: EnvironmentDto | undefin
   }
 
   return environment.variables.map((variable) => variable.key).filter(Boolean);
+}
+
+export function getActiveEnvironmentForCollection(
+  environments: EnvironmentDto[],
+  collectionId: string | null,
+): EnvironmentDto | undefined {
+  if (!collectionId) {
+    return undefined;
+  }
+
+  return environments.find((environment) => environment.collection_id === collectionId && environment.is_default);
 }
 
 export interface VariableSegment {

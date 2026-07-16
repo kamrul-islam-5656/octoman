@@ -55,12 +55,6 @@ const collectionSchema = new Schema(
       trim: true,
       maxlength: 1000,
     },
-    environment_id: {
-      type: Schema.Types.ObjectId,
-      ref: "Environment",
-      default: null,
-      index: true,
-    },
     auth: {
       type: authSchema,
       default: {

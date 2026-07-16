@@ -2,6 +2,7 @@ import { ReactElement, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
   FileJson2,
   Folder,
   FolderKanban,
@@ -23,7 +24,6 @@ interface CollectionsTreeProps {
   collections: CollectionDto[];
   folders: DocumentationFolderDto[];
   requests: RequestDto[];
-  organizationName: string;
   isReadonly: boolean;
   collectionFilter: string;
   folderFilter: string;
@@ -32,10 +32,10 @@ interface CollectionsTreeProps {
   expandedFolderIds: Record<string, boolean>;
   onToggleCollectionExpanded: (collectionId: string) => void;
   onToggleFolderExpanded: (folderId: string) => void;
+  onCollapseCollectionFolders: (collectionId: string) => void;
   onSelectCollection: (collectionId: string) => void;
   onSelectFolder: (folderId: string) => void;
   onSelectRequest: (request: RequestDto) => void;
-  onResetFilters: () => void;
   onOpenContextMenu: (
     event: { preventDefault: () => void; stopPropagation: () => void; clientX: number; clientY: number },
     payload: TreeContextMenuPayload,
@@ -49,7 +49,6 @@ export function CollectionsTree({
   collections,
   folders,
   requests,
-  organizationName,
   isReadonly,
   collectionFilter,
   folderFilter,
@@ -58,10 +57,10 @@ export function CollectionsTree({
   expandedFolderIds,
   onToggleCollectionExpanded,
   onToggleFolderExpanded,
+  onCollapseCollectionFolders,
   onSelectCollection,
   onSelectFolder,
   onSelectRequest,
-  onResetFilters,
   onOpenContextMenu,
   onCreateCollection,
   canImportCollection,
@@ -300,6 +299,21 @@ export function CollectionsTree({
               <span className="truncate text-sm">{collection.name}</span>
             </span>
           </button>
+          {nestedFolders.length > 0 && expanded ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+              title="Collapse all folders"
+              onClick={(event) => {
+                event.stopPropagation();
+                onCollapseCollectionFolders(collection.id);
+              }}
+            >
+              <ChevronsDownUp size={12} />
+            </Button>
+          ) : null}
           {!isReadonly ? (
             <Button
               type="button"
@@ -378,19 +392,6 @@ export function CollectionsTree({
         </div>
 
         <div className="mt-2 space-y-1">
-          <button
-            type="button"
-            onClick={onResetFilters}
-            className={`odl-list-item text-left ${
-              collectionFilter === "all" && folderFilter === "all" ? "odl-list-item-active" : ""
-            }`}
-          >
-            <span className="inline-flex min-w-0 items-center gap-1.5">
-              <FolderKanban size={13} className="shrink-0 text-[var(--muted)]" />
-              <span className="truncate text-sm">{organizationName}</span>
-            </span>
-          </button>
-
           {collections.map((collection) => renderCollectionNode(collection))}
 
           {unassignedRootRequests.length > 0 || unassignedFolderNodes.length > 0 ? (

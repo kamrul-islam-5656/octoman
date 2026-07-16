@@ -1,17 +1,17 @@
 "use client";
 
-import { Clock, FolderKanban, Globe, Settings, ShieldUser } from "lucide-react";
+import { Clock, FolderKanban, Settings, ShieldUser, Sparkles } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { SimpleTooltip } from "@/components/ui/simple-tooltip";
 
-export type SidebarTab = "workspace" | "environments" | "history" | "settings" | "admin";
+export type SidebarTab = "workspace" | "history" | "settings" | "admin" | "ai";
 
 const RAIL_ITEMS: { id: SidebarTab; label: string; icon: typeof FolderKanban; adminOnly?: boolean }[] = [
   { id: "workspace", label: "Workspace", icon: FolderKanban },
-  { id: "environments", label: "Environments", icon: Globe },
   { id: "history", label: "History", icon: Clock },
   { id: "settings", label: "Workspace settings", icon: Settings },
+  { id: "ai", label: "AI Assistant", icon: Sparkles },
   { id: "admin", label: "Organization & users", icon: ShieldUser, adminOnly: true },
 ];
 
@@ -29,23 +29,20 @@ export function SidebarIconRail({ activeTab, onSelectTab, showAdmin }: SidebarIc
         const Icon = item.icon;
 
         return (
-          <Tooltip key={item.id}>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() => onSelectTab(item.id)}
-                aria-label={item.label}
-                className={cn(
-                  "flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
-                  isActive &&
-                    "bg-[color-mix(in_oklab,var(--primary)_14%,transparent)] text-[var(--primary)] hover:text-[var(--primary)]",
-                )}
-              >
-                <Icon size={17} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">{item.label}</TooltipContent>
-          </Tooltip>
+          <SimpleTooltip key={item.id} side="right" content={item.label}>
+            <button
+              type="button"
+              onClick={() => onSelectTab(item.id)}
+              aria-label={item.label}
+              className={cn(
+                "flex h-9 w-9 cursor-pointer items-center justify-center rounded-lg text-[var(--muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+                isActive &&
+                  "bg-[color-mix(in_oklab,var(--primary)_14%,transparent)] text-[var(--primary)] hover:text-[var(--primary)]",
+              )}
+            >
+              <Icon size={17} />
+            </button>
+          </SimpleTooltip>
         );
       })}
     </nav>

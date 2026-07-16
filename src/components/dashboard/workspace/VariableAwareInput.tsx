@@ -1,4 +1,4 @@
-import { ChangeEvent, KeyboardEvent, useRef, useState } from "react";
+import { ChangeEvent, KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
 
 import { detectVariableToken, splitVariableSegments } from "./utils";
 
@@ -27,7 +27,20 @@ export function VariableAwareInput({
   disabled = false,
 }: VariableAwareInputProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const markerRef = useRef<HTMLSpanElement>(null);
   const [suggestion, setSuggestion] = useState<SuggestionState | null>(null);
+  const [suggestionLeft, setSuggestionLeft] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!suggestion || !markerRef.current || !wrapperRef.current) {
+      return;
+    }
+
+    const markerRect = markerRef.current.getBoundingClientRect();
+    const wrapperRect = wrapperRef.current.getBoundingClientRect();
+    setSuggestionLeft(markerRect.left - wrapperRect.left);
+  }, [suggestion, value]);
 
   function updateSuggestions(nextValue: string, cursor: number) {
     if (environmentVariableKeys.length === 0) {
@@ -106,7 +119,7 @@ export function VariableAwareInput({
   const segments = splitVariableSegments(value);
 
   return (
-    <div className="relative">
+    <div ref={wrapperRef} className="relative">
       <div
         aria-hidden
         className={`${className} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre`}
@@ -135,6 +148,17 @@ export function VariableAwareInput({
         )}
       </div>
 
+      {suggestion ? (
+        <div
+          aria-hidden
+          className={`${className} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre`}
+          style={{ visibility: "hidden" }}
+        >
+          {value.slice(0, suggestion.start)}
+          <span ref={markerRef} />
+        </div>
+      ) : null}
+
       <input
         ref={inputRef}
         type="text"
@@ -154,7 +178,10 @@ export function VariableAwareInput({
       />
 
       {suggestion ? (
-        <div className="absolute left-0 top-full z-20 mt-1 max-h-48 w-full max-w-xs overflow-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg">
+        <div
+          className="absolute top-full z-20 mt-1 max-h-48 w-56 max-w-xs overflow-auto rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg"
+          style={{ left: suggestionLeft }}
+        >
           {suggestion.matches.map((key, index) => (
             <button
               type="button"

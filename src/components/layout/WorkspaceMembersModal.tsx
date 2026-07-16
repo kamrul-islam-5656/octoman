@@ -7,6 +7,7 @@ import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useApiFetch } from "@/components/providers/ApiActivityProvider";
 import { InvitationDto, WorkspaceDto, WorkspaceMemberDto } from "@/types";
 
 interface WorkspaceMembersModalProps {
@@ -31,6 +32,7 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<string | null>(null);
   const [removingUserId, setRemovingUserId] = useState<string | null>(null);
   const [cancelingInvitationId, setCancelingInvitationId] = useState<string | null>(null);
+  const apiFetch = useApiFetch();
 
   const isOwner = workspace.role === "Owner";
   const canManage = workspace.role === "Owner" || workspace.role === "Admin";
@@ -41,8 +43,8 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
     setError(null);
 
     const [membersRes, invitationsRes] = await Promise.all([
-      fetch(`/api/workspaces/${workspace.id}/members`, { cache: "no-store" }),
-      fetch(`/api/workspaces/${workspace.id}/invitations`, { cache: "no-store" }),
+      apiFetch(`/api/workspaces/${workspace.id}/members`, { cache: "no-store" }),
+      apiFetch(`/api/workspaces/${workspace.id}/invitations`, { cache: "no-store" }),
     ]);
 
     const membersPayload = (await membersRes.json().catch(() => null)) as
@@ -80,7 +82,7 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
     setError(null);
     setLastInviteUrl(null);
 
-    const response = await fetch(`/api/workspaces/${workspace.id}/invitations`, {
+    const response = await apiFetch(`/api/workspaces/${workspace.id}/invitations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
@@ -105,7 +107,7 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
   async function handleCancelInvitation(id: string) {
     setCancelingInvitationId(id);
     try {
-      const response = await fetch(`/api/invitations/${id}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/invitations/${id}`, { method: "DELETE" });
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         setError(payload?.error ?? "Failed to cancel invitation.");
@@ -120,7 +122,7 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
   async function handleRoleChange(userId: string, role: "Admin" | "Member") {
     setUpdatingRoleUserId(userId);
     try {
-      const response = await fetch(`/api/workspaces/${workspace.id}/members/${userId}`, {
+      const response = await apiFetch(`/api/workspaces/${workspace.id}/members/${userId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role }),
@@ -144,7 +146,7 @@ export function WorkspaceMembersModal({ workspace, onClose }: WorkspaceMembersMo
 
     setRemovingUserId(userId);
     try {
-      const response = await fetch(`/api/workspaces/${workspace.id}/members/${userId}`, {
+      const response = await apiFetch(`/api/workspaces/${workspace.id}/members/${userId}`, {
         method: "DELETE",
       });
 

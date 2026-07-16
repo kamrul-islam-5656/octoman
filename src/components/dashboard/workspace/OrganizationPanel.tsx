@@ -3,6 +3,7 @@ import { Building2, LoaderCircle, Plus, Save, ShieldUser, Trash2 } from "lucide-
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useApiFetch } from "@/components/providers/ApiActivityProvider";
 import { AdminUserDto, OrganizationDto, UserRole } from "@/types";
 
 import { canAdmin, getErrorMessage } from "./utils";
@@ -41,13 +42,14 @@ export function OrganizationPanel({
   const [isCreatingUser, setIsCreatingUser] = useState(false);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<string | null>(null);
   const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
+  const apiFetch = useApiFetch();
 
   const loadUsers = useCallback(async () => {
     if (!canAdmin(role)) {
       return;
     }
 
-    const response = await fetch("/api/users", { cache: "no-store" });
+    const response = await apiFetch("/api/users", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | { data?: AdminUserDto[]; error?: string }
       | null;
@@ -59,14 +61,14 @@ export function OrganizationPanel({
 
     setUsers(payload?.data ?? []);
     setGlobalError(null);
-  }, [role, setGlobalError, setUsers]);
+  }, [role, setGlobalError, setUsers, apiFetch]);
 
   const loadOrganization = useCallback(async () => {
     if (!canAdmin(role)) {
       return;
     }
 
-    const response = await fetch("/api/organization", { cache: "no-store" });
+    const response = await apiFetch("/api/organization", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | { data?: OrganizationDto; error?: string }
       | null;
@@ -80,7 +82,7 @@ export function OrganizationPanel({
     setOrganizationNameDraft(payload?.data?.name ?? "");
     setOrganizationSlugDraft(payload?.data?.slug ?? "");
     setGlobalError(null);
-  }, [role, setGlobalError, setOrganization]);
+  }, [role, setGlobalError, setOrganization, apiFetch]);
 
   useEffect(() => {
     void loadOrganization();
@@ -93,7 +95,7 @@ export function OrganizationPanel({
 
     setIsCreatingUser(true);
     try {
-      const response = await fetch("/api/users", {
+      const response = await apiFetch("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -124,7 +126,7 @@ export function OrganizationPanel({
   async function handleUpdateUserRole(userId: string, nextRole: UserRole) {
     setUpdatingRoleUserId(userId);
     try {
-      const response = await fetch(`/api/users/${userId}`, {
+      const response = await apiFetch(`/api/users/${userId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role: nextRole }),
@@ -146,7 +148,7 @@ export function OrganizationPanel({
   async function handleDeleteUser(userId: string) {
     setDeletingUserId(userId);
     try {
-      const response = await fetch(`/api/users/${userId}`, { method: "DELETE" });
+      const response = await apiFetch(`/api/users/${userId}`, { method: "DELETE" });
 
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
 
@@ -166,7 +168,7 @@ export function OrganizationPanel({
 
     setIsSavingOrganization(true);
     try {
-      const response = await fetch("/api/organization", {
+      const response = await apiFetch("/api/organization", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

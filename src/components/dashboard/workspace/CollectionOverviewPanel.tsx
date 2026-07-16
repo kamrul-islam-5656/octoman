@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
-import { FileJson2, Folder, FolderKanban, LoaderCircle, Save } from "lucide-react";
+import { FileJson2, Folder, FolderKanban, Globe, LoaderCircle, Save, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { CollectionDto, DocumentationFolderDto, EnvironmentDto, RequestAuthConfig, RequestDto } from "@/types";
+import { CollectionDto, DocumentationFolderDto, EnvironmentDto, EnvironmentVariable, RequestAuthConfig, RequestDto } from "@/types";
 
 import { AuthEditor } from "./AuthEditor";
+import { CollectionEnvironmentsPanel } from "./CollectionEnvironmentsPanel";
+import { GenerateDocumentationModal } from "./GenerateDocumentationModal";
 import {
   AuthOwnerRef,
   countCollectionContents,
   countFolderContents,
+  getActiveEnvironmentForCollection,
   getEnvironmentVariableKeys,
   getFolderAncestry,
   resolveEffectiveAuth,
@@ -19,7 +22,7 @@ export type DetailViewTarget =
   | { type: "collection"; collection: CollectionDto }
   | { type: "folder"; folder: DocumentationFolderDto };
 
-export type DetailTabId = "overview" | "authorization";
+export type DetailTabId = "overview" | "authorization" | "environment";
 
 interface CollectionOverviewPanelProps {
   target: DetailViewTarget;
@@ -27,13 +30,21 @@ interface CollectionOverviewPanelProps {
   folders: DocumentationFolderDto[];
   requests: RequestDto[];
   environments: EnvironmentDto[];
-  selectedEnvironmentId: string;
   isReadonly: boolean;
   detailTab: DetailTabId;
   setDetailTab: (tab: DetailTabId) => void;
+  onOpenAiSettings: () => void;
   onUpdateDescription: (value: string) => Promise<void>;
   onUpdateAuth: (auth: RequestAuthConfig) => Promise<void>;
   onNavigateToOwner: (owner: AuthOwnerRef) => void;
+  isCreatingEnvironment: boolean;
+  settingActiveEnvironmentId: string | null;
+  isSavingEnvironmentVariables: boolean;
+  deletingEnvironmentId: string | null;
+  onCreateEnvironment: (collectionId: string, name: string) => void;
+  onSetActiveEnvironment: (environmentId: string) => void;
+  onSaveEnvironmentVariables: (environmentId: string, variables: EnvironmentVariable[]) => void;
+  onDeleteEnvironment: (environmentId: string) => void;
 }
 
 export function CollectionOverviewPanel({
@@ -42,13 +53,21 @@ export function CollectionOverviewPanel({
   folders,
   requests,
   environments,
-  selectedEnvironmentId,
   isReadonly,
   detailTab,
   setDetailTab,
+  onOpenAiSettings,
   onUpdateDescription,
   onUpdateAuth,
   onNavigateToOwner,
+  isCreatingEnvironment,
+  settingActiveEnvironmentId,
+  isSavingEnvironmentVariables,
+  deletingEnvironmentId,
+  onCreateEnvironment,
+  onSetActiveEnvironment,
+  onSaveEnvironmentVariables,
+  onDeleteEnvironment,
 }: CollectionOverviewPanelProps) {
   const targetId = target.type === "collection" ? target.collection.id : target.folder.id;
   const name = target.type === "collection" ? target.collection.name : target.folder.name;
@@ -58,6 +77,7 @@ export function CollectionOverviewPanel({
   const [descriptionDraft, setDescriptionDraft] = useState(description);
   const [authDraft, setAuthDraft] = useState(auth);
   const [isSaving, setIsSaving] = useState(false);
+  const [showDocumentationModal, setShowDocumentationModal] = useState(false);
 
   useEffect(() => {
     setDescriptionDraft(description);
@@ -107,8 +127,13 @@ export function CollectionOverviewPanel({
         )
       : null;
 
-  const environment = environments.find((item) => item.id === selectedEnvironmentId);
+  const ownerCollectionId = target.type === "collection" ? target.collection.id : target.folder.collection_id;
+  const environment = getActiveEnvironmentForCollection(environments, ownerCollectionId);
   const environmentVariableKeys = getEnvironmentVariableKeys(environment);
+  const collectionEnvironments =
+    target.type === "collection"
+      ? environments.filter((item) => item.collection_id === target.collection.id)
+      : [];
 
   return (
     <section className="flex h-full flex-col overflow-auto border border-[var(--border)] bg-[var(--surface)] p-4">
@@ -131,19 +156,45 @@ export function CollectionOverviewPanel({
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-semibold text-[var(--text)]">{name}</h2>
 
-        {!isReadonly ? (
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled={!isDirty || isSaving}
-            onClick={() => void handleSave()}
-          >
-            {isSaving ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />}
-            Save{isDirty ? "" : "d"}
-          </Button>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {target.type === "collection" ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowDocumentationModal(true)}
+            >
+              <Sparkles size={14} />
+              API Docs
+            </Button>
+          ) : null}
+
+          {!isReadonly ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={!isDirty || isSaving}
+              onClick={() => void handleSave()}
+            >
+              {isSaving ? <LoaderCircle className="animate-spin" size={14} /> : <Save size={14} />}
+              Save{isDirty ? "" : "d"}
+            </Button>
+          ) : null}
+        </div>
       </div>
+
+      {showDocumentationModal && target.type === "collection" ? (
+        <GenerateDocumentationModal
+          collectionId={target.collection.id}
+          collectionName={target.collection.name}
+          onClose={() => setShowDocumentationModal(false)}
+          onOpenAiSettings={() => {
+            setShowDocumentationModal(false);
+            onOpenAiSettings();
+          }}
+        />
+      ) : null}
 
       <div className="odl-tabbar mb-3">
         <div className="flex flex-wrap items-center gap-4">
@@ -161,6 +212,18 @@ export function CollectionOverviewPanel({
           >
             Authorization
           </button>
+          {target.type === "collection" ? (
+            <button
+              type="button"
+              className={`odl-tab ${detailTab === "environment" ? "odl-tab-active" : ""}`}
+              onClick={() => setDetailTab("environment")}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Globe size={12} />
+                Environment
+              </span>
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -210,6 +273,21 @@ export function CollectionOverviewPanel({
             environmentVariableKeys={environmentVariableKeys}
           />
         </div>
+      ) : null}
+
+      {detailTab === "environment" && target.type === "collection" ? (
+        <CollectionEnvironmentsPanel
+          environments={collectionEnvironments}
+          isReadonly={isReadonly}
+          isCreatingEnvironment={isCreatingEnvironment}
+          settingActiveEnvironmentId={settingActiveEnvironmentId}
+          isSavingEnvironmentVariables={isSavingEnvironmentVariables}
+          deletingEnvironmentId={deletingEnvironmentId}
+          onCreateEnvironment={(name) => onCreateEnvironment(target.collection.id, name)}
+          onSetActiveEnvironment={onSetActiveEnvironment}
+          onSaveEnvironmentVariables={onSaveEnvironmentVariables}
+          onDeleteEnvironment={onDeleteEnvironment}
+        />
       ) : null}
     </section>
   );

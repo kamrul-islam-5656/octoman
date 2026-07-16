@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { CodeEditor } from "@/components/ui/CodeEditor";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { CollectionDto, DocumentationFolderDto, HttpMethod, KeyValuePair, RequestBodyMode } from "@/types";
+import { CollectionDto, DocumentationFolderDto, EnvironmentDto, HttpMethod, KeyValuePair, RequestBodyMode } from "@/types";
 
 import { AuthEditor } from "./AuthEditor";
 import { BuilderState, RequestEditorTabId } from "./types";
@@ -40,6 +40,8 @@ interface RequestEditorPanelProps {
   scriptDraft: string;
   setScriptDraft: (value: string) => void;
   environmentVariableKeys: string[];
+  environments: EnvironmentDto[];
+  onSelectEnvironment: (environmentId: string) => void;
   onNavigateToAuthOwner: (owner: AuthOwnerRef) => void;
   onStartNewRequest: () => void;
   onSaveRequest: () => void;
@@ -67,6 +69,8 @@ export function RequestEditorPanel({
   scriptDraft,
   setScriptDraft,
   environmentVariableKeys,
+  environments,
+  onSelectEnvironment,
   onNavigateToAuthOwner,
   onStartNewRequest,
   onSaveRequest,
@@ -77,6 +81,11 @@ export function RequestEditorPanel({
     builder.bodyMode === "raw" && builder.bodyRaw.trim()
       ? getJsonParseError(builder.bodyRaw)
       : null;
+
+  const collectionEnvironments = builder.collectionId
+    ? environments.filter((environment) => environment.collection_id === builder.collectionId)
+    : [];
+  const activeEnvironmentId = collectionEnvironments.find((environment) => environment.is_default)?.id ?? "";
 
   return (
     <section className="flex h-full flex-col overflow-hidden border-b border-[var(--border)] bg-[var(--surface)]">
@@ -103,6 +112,21 @@ export function RequestEditorPanel({
             {isDeletingRequest ? <LoaderCircle className="animate-spin" size={16} /> : <Trash2 size={16} />}
             Delete
           </Button>
+        ) : null}
+
+        {collectionEnvironments.length > 0 ? (
+          <select
+            value={activeEnvironmentId}
+            onChange={(event) => onSelectEnvironment(event.target.value)}
+            className="odl-input ml-auto w-auto text-xs"
+            title="Active environment for this collection"
+          >
+            {collectionEnvironments.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name}
+              </option>
+            ))}
+          </select>
         ) : null}
       </div>
 

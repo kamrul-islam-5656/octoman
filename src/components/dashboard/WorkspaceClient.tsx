@@ -4,6 +4,9 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useSta
 import { useSession } from "next-auth/react";
 
 import { TopBar } from "@/components/layout/TopBar";
+import { useApiFetch } from "@/components/providers/ApiActivityProvider";
+import { executeRequestInBrowser, isLocalOrPrivateHost } from "@/lib/client/request-runner";
+import { interpolateString, variablesToMap } from "@/lib/server/interpolate";
 import {
   AdminUserDto,
   CollectionDto,
@@ -18,23 +21,25 @@ import {
   WorkspaceDto,
 } from "@/types";
 
+import { AiSettingsPanel } from "./workspace/AiSettingsPanel";
 import { CollectionOverviewPanel, DetailTabId, DetailViewTarget } from "./workspace/CollectionOverviewPanel";
 import { CollectionsTree } from "./workspace/CollectionsTree";
 import { DeleteConfirmModal } from "./workspace/DeleteConfirmModal";
-import { EnvironmentsPanel } from "./workspace/EnvironmentsPanel";
+import { UnsavedTabCloseModal } from "./workspace/UnsavedTabCloseModal";
 import { HistoryPanel } from "./workspace/HistoryPanel";
 import { NameModal } from "./workspace/NameModal";
 import { OrganizationPanel } from "./workspace/OrganizationPanel";
 import { RequestEditorPanel } from "./workspace/RequestEditorPanel";
+import { RequestTabBar, RequestTabBarItem } from "./workspace/RequestTabBar";
 import { ResponsePanel } from "./workspace/ResponsePanel";
 import { SidebarIconRail, SidebarTab } from "./workspace/SidebarIconRail";
 import { TreeContextMenu } from "./workspace/TreeContextMenu";
 import {
   BuilderState,
   DeleteConfirmState,
-  ExecuteResultState,
   NameModalState,
   RequestEditorTabId,
+  RequestTabState,
   ResponseTabId,
   TreeContextMenuPayload,
   TreeContextMenuState,
@@ -44,9 +49,11 @@ import {
   canAdmin,
   canWrite,
   clamp,
+  cloneBuilderState,
   createEmptyBuilder,
   createInheritAuth,
   extractCookiesFromHeaders,
+  getActiveEnvironmentForCollection,
   getErrorMessage,
   getEnvironmentVariableKeys,
   getJsonParseError,
@@ -57,6 +64,78 @@ import {
   stripCookieHeaders,
 } from "./workspace/utils";
 import { WorkspaceControlsPanel } from "./workspace/WorkspaceControlsPanel";
+
+const DEFAULT_SCRIPT_DRAFT =
+  "// Scripts run support can be connected here.\n// Keep this script for request-related notes.";
+
+function createRequestTab(
+  builder: BuilderState,
+  requestId: string | null = null,
+  requestCookies: KeyValuePair[] = [],
+): RequestTabState {
+  return {
+    tabId: `tab-${crypto.randomUUID()}`,
+    requestId,
+    builder,
+    savedSnapshot: cloneBuilderState(builder),
+    requestEditorTab: "docs",
+    requestCookies,
+    showCookiesEditor: false,
+    responseTab: "body",
+    executeResult: null,
+    isExecuting: false,
+    isSavingRequest: false,
+    isDeletingRequest: false,
+    scriptDraft: DEFAULT_SCRIPT_DRAFT,
+  };
+}
+
+function isRequestTabDirty(tab: RequestTabState): boolean {
+  return JSON.stringify(tab.builder) !== JSON.stringify(tab.savedSnapshot);
+}
+
+const OPEN_TABS_STORAGE_PREFIX = "octoman-open-tabs-";
+
+interface PersistedTab {
+  tabId: string;
+  requestId: string | null;
+  builder: BuilderState;
+  savedSnapshot: BuilderState;
+  requestEditorTab: RequestEditorTabId;
+  requestCookies: KeyValuePair[];
+  showCookiesEditor: boolean;
+  responseTab: ResponseTabId;
+  scriptDraft: string;
+}
+
+interface PersistedTabsPayload {
+  tabs: PersistedTab[];
+  activeTabId: string | null;
+}
+
+function toPersistedTab(tab: RequestTabState): PersistedTab {
+  return {
+    tabId: tab.tabId,
+    requestId: tab.requestId,
+    builder: tab.builder,
+    savedSnapshot: tab.savedSnapshot,
+    requestEditorTab: tab.requestEditorTab,
+    requestCookies: tab.requestCookies,
+    showCookiesEditor: tab.showCookiesEditor,
+    responseTab: tab.responseTab,
+    scriptDraft: tab.scriptDraft,
+  };
+}
+
+function fromPersistedTab(persisted: PersistedTab): RequestTabState {
+  return {
+    ...persisted,
+    executeResult: null,
+    isExecuting: false,
+    isSavingRequest: false,
+    isDeletingRequest: false,
+  };
+}
 
 export interface WorkspaceInitialData {
   collections: CollectionDto[];
@@ -76,16 +155,9 @@ export function WorkspaceClient({
   initialData: WorkspaceInitialData;
 }) {
   const { data: session } = useSession();
+  const apiFetch = useApiFetch();
 
   const role = session?.user?.role;
-
-  const initialEnvironmentId =
-    initialData.environments.find((env) => env.is_default)?.id ??
-    initialData.environments[0]?.id ??
-    "";
-
-  const initialEnvironmentVariables =
-    initialData.environments.find((env) => env.id === initialEnvironmentId)?.variables ?? [];
 
   const [collections, setCollections] = useState<CollectionDto[]>(initialData.collections);
   const [requests, setRequests] = useState<RequestDto[]>(initialData.requests);
@@ -98,37 +170,172 @@ export function WorkspaceClient({
   const [collectionFilter, setCollectionFilter] = useState<string>("all");
   const [folderFilter, setFolderFilter] = useState<string>("all");
   const [historyScope, setHistoryScope] = useState<"mine" | "tenant">("mine");
-  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<string>(initialEnvironmentId);
 
-  const [builder, setBuilder] = useState<BuilderState>(createEmptyBuilder());
-  const [environmentVariablesDraft, setEnvironmentVariablesDraft] =
-    useState<EnvironmentVariable[]>(initialEnvironmentVariables);
+  const [tabs, setTabs] = useState<RequestTabState[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [isTabsHydrated, setIsTabsHydrated] = useState(false);
 
-  const [newEnvironmentName, setNewEnvironmentName] = useState("");
+  const openTabsStorageKey = `${OPEN_TABS_STORAGE_PREFIX}${initialData.activeWorkspaceId}`;
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(openTabsStorageKey);
+
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as PersistedTabsPayload;
+        const validRequestIds = new Set(initialData.requests.map((item) => item.id));
+        const restoredTabs = parsed.tabs
+          .filter((tab) => tab.requestId === null || validRequestIds.has(tab.requestId))
+          .map(fromPersistedTab);
+
+        setTabs(restoredTabs);
+        setActiveTabId(
+          restoredTabs.some((tab) => tab.tabId === parsed.activeTabId)
+            ? parsed.activeTabId
+            : (restoredTabs[0]?.tabId ?? null),
+        );
+      } catch {
+        // Ignore corrupt/incompatible persisted tab state.
+      }
+    }
+
+    setIsTabsHydrated(true);
+    // Restore once on mount only; the persist effect below keeps storage in sync afterward.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!isTabsHydrated) return;
+
+    window.localStorage.setItem(
+      openTabsStorageKey,
+      JSON.stringify({ tabs: tabs.map(toPersistedTab), activeTabId } satisfies PersistedTabsPayload),
+    );
+  }, [tabs, activeTabId, isTabsHydrated, openTabsStorageKey]);
 
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
-  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
-  const [responsesByRequestId, setResponsesByRequestId] = useState<
-    Record<string, ExecuteResultState>
-  >({});
-  const [draftExecuteResult, setDraftExecuteResult] = useState<ExecuteResultState | null>(null);
-  const executeResult = builder.id ? responsesByRequestId[builder.id] ?? null : draftExecuteResult;
+  const activeTab = useMemo(
+    () => tabs.find((tab) => tab.tabId === activeTabId) ?? null,
+    [tabs, activeTabId],
+  );
+
+  const builder = activeTab?.builder ?? createEmptyBuilder();
+  const activeRequestId = activeTab?.requestId ?? null;
+  const executeResult = activeTab?.executeResult ?? null;
+  const requestEditorTab = activeTab?.requestEditorTab ?? "docs";
+  const responseTab = activeTab?.responseTab ?? "body";
+  const requestCookies = activeTab?.requestCookies ?? [];
+  const showCookiesEditor = activeTab?.showCookiesEditor ?? false;
+  const scriptDraft = activeTab?.scriptDraft ?? DEFAULT_SCRIPT_DRAFT;
+  const isExecuting = activeTab?.isExecuting ?? false;
+  const isSavingRequest = activeTab?.isSavingRequest ?? false;
+  const isDeletingRequest = activeTab?.isDeletingRequest ?? false;
+
+  const tabBarItems = useMemo<RequestTabBarItem[]>(
+    () =>
+      tabs.map((tab) => ({
+        tabId: tab.tabId,
+        requestId: tab.requestId,
+        name: tab.builder.name,
+        method: tab.builder.method,
+        isDirty: isRequestTabDirty(tab),
+      })),
+    [tabs],
+  );
+
+  function updateTabById(tabId: string, updater: (tab: RequestTabState) => Partial<RequestTabState>) {
+    setTabs((previous) => previous.map((tab) => (tab.tabId === tabId ? { ...tab, ...updater(tab) } : tab)));
+  }
+
+  function updateActiveTab(updater: (tab: RequestTabState) => Partial<RequestTabState>) {
+    if (!activeTabId) return;
+    updateTabById(activeTabId, updater);
+  }
+
+  const setBuilder = (update: BuilderState | ((previous: BuilderState) => BuilderState)) => {
+    updateActiveTab((tab) => ({
+      builder: typeof update === "function" ? (update as (previous: BuilderState) => BuilderState)(tab.builder) : update,
+    }));
+  };
+
+  const setRequestEditorTab = (tab: RequestEditorTabId) => updateActiveTab(() => ({ requestEditorTab: tab }));
+  const setResponseTab = (tab: ResponseTabId) => updateActiveTab(() => ({ responseTab: tab }));
+  const setScriptDraft = (value: string) => updateActiveTab(() => ({ scriptDraft: value }));
+
+  const setRequestCookies = (update: KeyValuePair[] | ((previous: KeyValuePair[]) => KeyValuePair[])) => {
+    updateActiveTab((tab) => ({
+      requestCookies:
+        typeof update === "function"
+          ? (update as (previous: KeyValuePair[]) => KeyValuePair[])(tab.requestCookies)
+          : update,
+    }));
+  };
+
+  const setShowCookiesEditor = (update: boolean | ((previous: boolean) => boolean)) => {
+    updateActiveTab((tab) => ({
+      showCookiesEditor: typeof update === "function" ? (update as (previous: boolean) => boolean)(tab.showCookiesEditor) : update,
+    }));
+  };
+
+  function closeTab(tabId: string) {
+    const index = tabs.findIndex((tab) => tab.tabId === tabId);
+    if (index === -1) return;
+
+    const nextTabs = tabs.filter((tab) => tab.tabId !== tabId);
+    setTabs(nextTabs);
+
+    if (activeTabId === tabId) {
+      const neighbor = nextTabs[index] ?? nextTabs[index - 1] ?? null;
+      setActiveTabId(neighbor?.tabId ?? null);
+    }
+  }
+
+  function selectTab(tabId: string) {
+    setActiveTabId(tabId);
+    setActiveDetailView(null);
+  }
+
+  const [unsavedTabCloseId, setUnsavedTabCloseId] = useState<string | null>(null);
+
+  function requestCloseTab(tabId: string) {
+    const tab = tabs.find((item) => item.tabId === tabId);
+    if (tab && isRequestTabDirty(tab)) {
+      setUnsavedTabCloseId(tabId);
+      return;
+    }
+    closeTab(tabId);
+  }
+
+  function cancelCloseTabConfirm() {
+    setUnsavedTabCloseId(null);
+  }
+
+  function discardAndCloseTab() {
+    if (!unsavedTabCloseId) return;
+    closeTab(unsavedTabCloseId);
+    setUnsavedTabCloseId(null);
+  }
+
+  async function saveAndCloseTab() {
+    if (!unsavedTabCloseId) return;
+    const tabId = unsavedTabCloseId;
+    const success = await handleSaveRequest(tabId);
+    if (success) {
+      closeTab(tabId);
+      setUnsavedTabCloseId(null);
+    }
+  }
+
   const [globalError, setGlobalError] = useState<string | null>(null);
-  const [isExecuting, setIsExecuting] = useState(false);
-  const [isSavingRequest, setIsSavingRequest] = useState(false);
-  const [isDeletingRequest, setIsDeletingRequest] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isCreatingEnvironment, setIsCreatingEnvironment] = useState(false);
   const [isSavingEnvironmentVariables, setIsSavingEnvironmentVariables] = useState(false);
-  const [settingDefaultEnvironmentId, setSettingDefaultEnvironmentId] = useState<string | null>(null);
+  const [settingActiveEnvironmentId, setSettingActiveEnvironmentId] = useState<string | null>(null);
+  const [deletingEnvironmentId, setDeletingEnvironmentId] = useState<string | null>(null);
   const [isNameModalSubmitting, setIsNameModalSubmitting] = useState(false);
   const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("workspace");
-  const [requestEditorTab, setRequestEditorTab] = useState<RequestEditorTabId>("docs");
-  const [responseTab, setResponseTab] = useState<ResponseTabId>("body");
-  const [requestCookies, setRequestCookies] = useState<KeyValuePair[]>([]);
-  const [showCookiesEditor, setShowCookiesEditor] = useState(false);
   const [expandedCollectionIds, setExpandedCollectionIds] = useState<Record<string, boolean>>({});
   const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({});
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
@@ -239,10 +446,6 @@ export function WorkspaceClient({
 
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteConfirmState | null>(null);
 
-  const [scriptDraft, setScriptDraft] = useState(
-    "// Scripts run support can be connected here.\n// Keep this script for request-related notes.",
-  );
-
   const folderById = useMemo(
     () => new Map(folders.map((folder) => [folder.id, folder])),
     [folders],
@@ -268,8 +471,8 @@ export function WorkspaceClient({
   }, [activeDetailView, collections, folders]);
 
   const environmentVariableKeys = useMemo(
-    () => getEnvironmentVariableKeys(environments.find((item) => item.id === selectedEnvironmentId)),
-    [environments, selectedEnvironmentId],
+    () => getEnvironmentVariableKeys(getActiveEnvironmentForCollection(environments, builder.collectionId)),
+    [environments, builder.collectionId],
   );
 
   const activeFolderPath = useMemo(() => {
@@ -331,7 +534,7 @@ export function WorkspaceClient({
   }, [executeResult]);
 
   const loadCollections = useCallback(async () => {
-    const response = await fetch("/api/collections", { cache: "no-store" });
+    const response = await apiFetch("/api/collections", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | { data?: CollectionDto[]; error?: string }
       | null;
@@ -343,10 +546,10 @@ export function WorkspaceClient({
 
     setCollections(payload?.data ?? []);
     setGlobalError(null);
-  }, []);
+  }, [apiFetch]);
 
   const loadFolders = useCallback(async () => {
-    const response = await fetch("/api/documentation/folders", { cache: "no-store" });
+    const response = await apiFetch("/api/documentation/folders", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | { data?: DocumentationFolderDto[]; error?: string }
       | null;
@@ -358,7 +561,7 @@ export function WorkspaceClient({
 
     setFolders(payload?.data ?? []);
     setGlobalError(null);
-  }, []);
+  }, [apiFetch]);
 
   const loadRequests = useCallback(
     async (collectionId = collectionFilter, folderId = folderFilter) => {
@@ -374,7 +577,7 @@ export function WorkspaceClient({
 
       const suffix = query.size > 0 ? `?${query.toString()}` : "";
 
-      const response = await fetch(`/api/requests${suffix}`, { cache: "no-store" });
+      const response = await apiFetch(`/api/requests${suffix}`, { cache: "no-store" });
       const payload = (await response.json().catch(() => null)) as
         | { data?: RequestDto[]; error?: string }
         | null;
@@ -387,11 +590,11 @@ export function WorkspaceClient({
       setRequests(payload?.data ?? []);
       setGlobalError(null);
     },
-    [collectionFilter, folderFilter],
+    [collectionFilter, folderFilter, apiFetch],
   );
 
   const loadEnvironments = useCallback(async () => {
-    const response = await fetch("/api/environments", { cache: "no-store" });
+    const response = await apiFetch("/api/environments", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | { data?: EnvironmentDto[]; error?: string }
       | null;
@@ -401,19 +604,9 @@ export function WorkspaceClient({
       return;
     }
 
-    const envs = payload?.data ?? [];
-    setEnvironments(envs);
-
-    const stillValid = envs.some((env) => env.id === selectedEnvironmentId);
-    const nextSelectedId = stillValid
-      ? selectedEnvironmentId
-      : (envs.find((env) => env.is_default)?.id ?? envs[0]?.id ?? "");
-
-    setSelectedEnvironmentId(nextSelectedId);
-    const nextSelectedEnvironment = envs.find((env) => env.id === nextSelectedId);
-    setEnvironmentVariablesDraft(nextSelectedEnvironment?.variables ?? []);
+    setEnvironments(payload?.data ?? []);
     setGlobalError(null);
-  }, [selectedEnvironmentId]);
+  }, [apiFetch]);
 
   const loadHistory = useCallback(
     async (collectionId = collectionFilter, scope = historyScope, folderId = folderFilter) => {
@@ -428,7 +621,7 @@ export function WorkspaceClient({
         query.set("folderId", folderId);
       }
 
-      const response = await fetch(`/api/history?${query.toString()}`, {
+      const response = await apiFetch(`/api/history?${query.toString()}`, {
         cache: "no-store",
       });
       const payload = (await response.json().catch(() => null)) as
@@ -443,7 +636,7 @@ export function WorkspaceClient({
       setHistory(payload?.data ?? []);
       setGlobalError(null);
     },
-    [collectionFilter, historyScope, folderFilter],
+    [collectionFilter, historyScope, folderFilter, apiFetch],
   );
 
   function expandFolderWithAncestors(folderId: string | null) {
@@ -478,6 +671,20 @@ export function WorkspaceClient({
     }));
   }
 
+  function collapseAllFoldersInCollection(collectionId: string) {
+    setExpandedFolderIds((previous) => {
+      const next = { ...previous };
+
+      folders.forEach((folder) => {
+        if (folder.collection_id === collectionId) {
+          next[folder.id] = false;
+        }
+      });
+
+      return next;
+    });
+  }
+
   async function handleSelectCollection(nextCollectionId: string) {
     setCollectionFilter(nextCollectionId);
 
@@ -491,10 +698,11 @@ export function WorkspaceClient({
       setActiveDetailView(null);
     }
 
-    setBuilder((previous) => ({
-      ...previous,
-      collectionId: nextCollectionId === "all" ? null : nextCollectionId,
-    }));
+    if (activeTab && activeTab.requestId === null) {
+      updateActiveTab((tab) => ({
+        builder: { ...tab.builder, collectionId: nextCollectionId === "all" ? null : nextCollectionId },
+      }));
+    }
 
     await loadHistory(nextCollectionId, historyScope, folderFilter);
   }
@@ -509,24 +717,13 @@ export function WorkspaceClient({
       setActiveDetailView(null);
     }
 
-    setBuilder((previous) => ({
-      ...previous,
-      folderId: nextFolderId === "all" ? null : nextFolderId,
-    }));
+    if (activeTab && activeTab.requestId === null) {
+      updateActiveTab((tab) => ({
+        builder: { ...tab.builder, folderId: nextFolderId === "all" ? null : nextFolderId },
+      }));
+    }
 
     await loadHistory(collectionFilter, historyScope, nextFolderId);
-  }
-
-  async function handleResetWorkspaceFilters() {
-    setCollectionFilter("all");
-    setFolderFilter("all");
-    setBuilder((previous) => ({
-      ...previous,
-      collectionId: null,
-      folderId: null,
-    }));
-
-    await Promise.all([loadRequests("all", "all"), loadHistory("all", historyScope, "all")]);
   }
 
   async function handleSelectHistoryScope(scope: "mine" | "tenant") {
@@ -534,14 +731,8 @@ export function WorkspaceClient({
     await loadHistory(collectionFilter, scope, folderFilter);
   }
 
-  function handleSelectEnvironment(environmentId: string) {
-    setSelectedEnvironmentId(environmentId);
-    const environment = environments.find((item) => item.id === environmentId);
-    setEnvironmentVariablesDraft(environment?.variables ?? []);
-  }
-
   async function createCollectionWithName(name: string) {
-    const response = await fetch("/api/collections", {
+    const response = await apiFetch("/api/collections", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, description: "" }),
@@ -557,117 +748,120 @@ export function WorkspaceClient({
     await Promise.all([loadCollections(), loadRequests("all", "all")]);
   }
 
-  async function handleCreateEnvironment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!newEnvironmentName.trim()) {
-      return;
-    }
-
+  async function handleCreateEnvironment(collectionId: string, name: string) {
     setIsCreatingEnvironment(true);
     try {
-      const response = await fetch("/api/environments", {
+      const existingForCollection = environments.filter((item) => item.collection_id === collectionId);
+
+      const response = await apiFetch("/api/environments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: newEnvironmentName,
-          is_default: environments.length === 0,
+          collectionId,
+          name,
+          is_default: existingForCollection.length === 0,
           variables: [{ key: "base_url", value: "https://api.example.com" }],
         }),
       });
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      const payload = (await response.json().catch(() => null)) as { data?: EnvironmentDto; error?: string } | null;
+
+      if (!response.ok || !payload?.data) {
         setGlobalError(getErrorMessage(payload, "Failed to create environment."));
         return;
       }
 
-      setNewEnvironmentName("");
-      await loadEnvironments();
+      setEnvironments((previous) => [...previous, payload.data as EnvironmentDto]);
+      setGlobalError(null);
     } finally {
       setIsCreatingEnvironment(false);
     }
   }
 
-  async function handleSaveEnvironmentVariables() {
-    if (!selectedEnvironmentId) {
-      return;
-    }
-
+  async function handleSaveEnvironmentVariables(environmentId: string, variables: EnvironmentVariable[]) {
     setIsSavingEnvironmentVariables(true);
     try {
-      const variables = environmentVariablesDraft.filter((item) => item.key.trim());
+      const cleaned = variables.filter((item) => item.key.trim());
 
-      const response = await fetch(`/api/environments/${selectedEnvironmentId}`, {
+      const response = await apiFetch(`/api/environments/${environmentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variables }),
+        body: JSON.stringify({ variables: cleaned }),
       });
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      const payload = (await response.json().catch(() => null)) as { data?: EnvironmentDto; error?: string } | null;
+
+      if (!response.ok || !payload?.data) {
         setGlobalError(getErrorMessage(payload, "Failed to save environment variables."));
         return;
       }
 
-      await loadEnvironments();
+      const updated = payload.data;
+      setEnvironments((previous) => previous.map((item) => (item.id === updated.id ? updated : item)));
+      setGlobalError(null);
     } finally {
       setIsSavingEnvironmentVariables(false);
     }
   }
 
-  async function handleSetDefaultEnvironment(environmentId: string) {
-    setSettingDefaultEnvironmentId(environmentId);
+  async function handleSetActiveEnvironment(environmentId: string) {
+    setSettingActiveEnvironmentId(environmentId);
     try {
-      const response = await fetch(`/api/environments/${environmentId}`, {
+      const response = await apiFetch(`/api/environments/${environmentId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_default: true }),
       });
 
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        setGlobalError(getErrorMessage(payload, "Failed to set default environment."));
+      const payload = (await response.json().catch(() => null)) as { data?: EnvironmentDto; error?: string } | null;
+
+      if (!response.ok || !payload?.data) {
+        setGlobalError(getErrorMessage(payload, "Failed to set active environment."));
         return;
       }
 
-      await loadEnvironments();
+      const updated = payload.data;
+      setEnvironments((previous) =>
+        previous.map((item) =>
+          item.collection_id === updated.collection_id ? { ...item, is_default: item.id === updated.id } : item,
+        ),
+      );
+      setGlobalError(null);
     } finally {
-      setSettingDefaultEnvironmentId(null);
+      setSettingActiveEnvironmentId(null);
     }
   }
 
-  function setResultForRequest(requestId: string | null, result: ExecuteResultState | null) {
-    if (!requestId) {
-      setDraftExecuteResult(result);
-      return;
-    }
+  async function handleDeleteEnvironment(environmentId: string) {
+    setDeletingEnvironmentId(environmentId);
+    try {
+      const response = await apiFetch(`/api/environments/${environmentId}`, { method: "DELETE" });
 
-    setResponsesByRequestId((previous) => {
-      if (result === null) {
-        const next = { ...previous };
-        delete next[requestId];
-        return next;
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        setGlobalError(getErrorMessage(payload, "Failed to delete environment."));
+        return;
       }
-      return { ...previous, [requestId]: result };
-    });
+
+      setEnvironments((previous) => previous.filter((item) => item.id !== environmentId));
+      setGlobalError(null);
+    } finally {
+      setDeletingEnvironmentId(null);
+    }
   }
 
   function startNewRequest() {
-    setBuilder(
-      createEmptyBuilder(
-        collectionFilter !== "all" ? collectionFilter : null,
-        folderFilter !== "all" ? folderFilter : null,
-      ),
+    const newBuilder = createEmptyBuilder(
+      collectionFilter !== "all" ? collectionFilter : null,
+      folderFilter !== "all" ? folderFilter : null,
     );
-    setActiveRequestId(null);
-    setRequestCookies([]);
-    setRequestEditorTab("docs");
+    const tab = createRequestTab(newBuilder);
+    setTabs((previous) => [...previous, tab]);
+    setActiveTabId(tab.tabId);
     setActiveDetailView(null);
-    setDraftExecuteResult(null);
   }
 
-  function pickRequest(item: RequestDto) {
-    const sanitizedHeaders = stripCookieHeaders(item.headers);
+  function openOrActivateRequestTab(item: RequestDto) {
     setActiveDetailView(null);
 
     if (item.collection_id) {
@@ -679,9 +873,14 @@ export function WorkspaceClient({
 
     expandFolderWithAncestors(item.folder_id);
 
-    setActiveRequestId(item.id);
-    setRequestCookies(extractCookiesFromHeaders(item.headers));
-    setBuilder({
+    const existingTab = tabs.find((tab) => tab.requestId === item.id);
+    if (existingTab) {
+      setActiveTabId(existingTab.tabId);
+      return;
+    }
+
+    const sanitizedHeaders = stripCookieHeaders(item.headers);
+    const nextBuilder: BuilderState = {
       id: item.id,
       name: item.name,
       description: item.description,
@@ -698,91 +897,104 @@ export function WorkspaceClient({
       auth: item.auth,
       collectionId: item.collection_id,
       folderId: item.folder_id,
-    });
-    setRequestEditorTab("docs");
+    };
+
+    const tab = createRequestTab(nextBuilder, item.id, extractCookiesFromHeaders(item.headers));
+    setTabs((previous) => [...previous, tab]);
+    setActiveTabId(tab.tabId);
   }
 
-  async function handleSaveRequest() {
-    if (!builder.name.trim()) {
+  async function handleSaveRequest(tabId: string | null = activeTabId): Promise<boolean> {
+    if (!tabId) return false;
+
+    const targetTab = tabs.find((tab) => tab.tabId === tabId);
+    if (!targetTab) return false;
+
+    const targetBuilder = targetTab.builder;
+
+    if (!targetBuilder.name.trim()) {
       setGlobalError("Request name is required before saving.");
-      return;
+      return false;
     }
 
-    if (!builder.url.trim()) {
+    if (!targetBuilder.url.trim()) {
       setGlobalError("URL is required before saving.");
-      return;
+      return false;
     }
 
-    if (builder.bodyMode === "raw" && builder.bodyRaw.trim()) {
-      const jsonError = getJsonParseError(builder.bodyRaw);
+    if (targetBuilder.bodyMode === "raw" && targetBuilder.bodyRaw.trim()) {
+      const jsonError = getJsonParseError(targetBuilder.bodyRaw);
       if (jsonError) {
         setGlobalError(`Invalid JSON body: ${jsonError}`);
-        return;
+        return false;
       }
     }
 
-    setIsSavingRequest(true);
+    updateTabById(tabId, () => ({ isSavingRequest: true }));
     setGlobalError(null);
 
-    const headersWithCookies = mergeCookiesIntoHeaders(builder.headers, requestCookies);
+    const headersWithCookies = mergeCookiesIntoHeaders(targetBuilder.headers, targetTab.requestCookies);
 
     const payload = {
-      name: builder.name,
-      description: builder.description,
-      method: builder.method,
-      url: builder.url,
+      name: targetBuilder.name,
+      description: targetBuilder.description,
+      method: targetBuilder.method,
+      url: targetBuilder.url,
       headers: headersWithCookies,
-      bodyMode: builder.bodyMode,
-      bodyRaw: builder.bodyRaw,
-      bodyForm: builder.bodyForm,
-      auth: builder.auth,
-      body: builder.bodyRaw,
-      collectionId: builder.collectionId,
-      folderId: builder.folderId,
+      bodyMode: targetBuilder.bodyMode,
+      bodyRaw: targetBuilder.bodyRaw,
+      bodyForm: targetBuilder.bodyForm,
+      auth: targetBuilder.auth,
+      body: targetBuilder.bodyRaw,
+      collectionId: targetBuilder.collectionId,
+      folderId: targetBuilder.folderId,
     };
 
-    const endpoint = builder.id ? `/api/requests/${builder.id}` : "/api/requests";
-    const method = builder.id ? "PATCH" : "POST";
+    const endpoint = targetBuilder.id ? `/api/requests/${targetBuilder.id}` : "/api/requests";
+    const method = targetBuilder.id ? "PATCH" : "POST";
 
-    const response = await fetch(endpoint, {
+    const response = await apiFetch(endpoint, {
       method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
-    setIsSavingRequest(false);
+    updateTabById(tabId, () => ({ isSavingRequest: false }));
 
     if (!response.ok) {
       const responsePayload = (await response.json().catch(() => null)) as
         | { error?: string }
         | null;
       setGlobalError(getErrorMessage(responsePayload, "Failed to save request."));
-      return;
+      return false;
     }
 
     const responsePayload = (await response.json()) as { data?: RequestDto };
     if (responsePayload.data) {
       const newId = responsePayload.data.id;
-      setBuilder((previous) => ({ ...previous, id: newId }));
-      setActiveRequestId(newId);
-
-      if (!builder.id && draftExecuteResult) {
-        setResultForRequest(newId, draftExecuteResult);
-        setDraftExecuteResult(null);
-      }
+      updateTabById(tabId, (tab) => {
+        const updatedBuilder = { ...tab.builder, id: newId };
+        return {
+          builder: updatedBuilder,
+          requestId: newId,
+          savedSnapshot: cloneBuilderState(updatedBuilder),
+        };
+      });
     }
 
     await loadRequests("all", "all");
+    return true;
   }
 
   async function handleDeleteRequest() {
-    if (!builder.id) {
+    const tabId = activeTabId;
+    if (!tabId || !builder.id) {
       return;
     }
 
-    setIsDeletingRequest(true);
+    updateTabById(tabId, () => ({ isDeletingRequest: true }));
     try {
-      const response = await fetch(`/api/requests/${builder.id}`, {
+      const response = await apiFetch(`/api/requests/${builder.id}`, {
         method: "DELETE",
       });
 
@@ -792,76 +1004,66 @@ export function WorkspaceClient({
         return;
       }
 
-      setResultForRequest(builder.id, null);
-      setActiveRequestId(null);
-      startNewRequest();
+      closeTab(tabId);
       await loadRequests("all", "all");
     } finally {
-      setIsDeletingRequest(false);
+      updateTabById(tabId, () => ({ isDeletingRequest: false }));
     }
   }
 
   async function handleExecuteRequest() {
+    const tabId = activeTabId;
+    if (!tabId) return;
+
     if (!builder.url.trim()) {
       setGlobalError("URL is required before executing request.");
       return;
     }
 
-    const requestKey = builder.id;
-
     if (builder.bodyMode === "raw" && builder.bodyRaw.trim()) {
       const jsonError = getJsonParseError(builder.bodyRaw);
       if (jsonError) {
-        setResultForRequest(requestKey, {
-          ok: false,
-          status: 400,
-          headers: [],
-          body: {
-            success: false,
-            message: jsonError,
-            errorSources: [],
-            err: null,
-            stack: null,
+        updateTabById(tabId, () => ({
+          executeResult: {
+            ok: false,
+            status: 400,
+            headers: [],
+            body: {
+              success: false,
+              message: jsonError,
+              errorSources: [],
+              err: null,
+              stack: null,
+            },
+            durationMs: 0,
+            errorCode: "INVALID_JSON_BODY",
+            error: null,
           },
-          durationMs: 0,
-          errorCode: "INVALID_JSON_BODY",
-          error: null,
-        });
+        }));
         setGlobalError(`Invalid JSON body: ${jsonError}`);
         return;
       }
     }
 
-    setIsExecuting(true);
+    updateTabById(tabId, () => ({ isExecuting: true, executeResult: null }));
     setGlobalError(null);
-    setResultForRequest(requestKey, null);
 
     const headersWithCookies = mergeCookiesIntoHeaders(builder.headers, requestCookies);
     const effectiveAuth =
       builder.auth.type === "inherit"
         ? resolveEffectiveAuth(builder.folderId, builder.collectionId, folders, collections).auth
         : builder.auth;
+    const activeEnvironment = getActiveEnvironmentForCollection(environments, builder.collectionId);
+    const variableMap = variablesToMap(activeEnvironment?.variables);
 
-    const response = await fetch("/api/tester/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        requestId: builder.id,
-        collectionId: builder.collectionId,
-        folderId: builder.folderId,
-        environmentId: selectedEnvironmentId || null,
-        method: builder.method,
-        url: builder.url,
-        headers: headersWithCookies,
-        bodyMode: builder.bodyMode,
-        bodyRaw: builder.bodyRaw,
-        bodyForm: builder.bodyForm,
-        auth: effectiveAuth,
-        body: builder.bodyRaw,
-      }),
-    });
+    let targetsLocalHost = false;
+    try {
+      targetsLocalHost = isLocalOrPrivateHost(new URL(interpolateString(builder.url, variableMap)).hostname);
+    } catch {
+      targetsLocalHost = false;
+    }
 
-    const payload = (await response.json().catch(() => null)) as
+    let payload:
       | {
           ok?: boolean;
           status?: number;
@@ -872,20 +1074,87 @@ export function WorkspaceClient({
           error?: string;
         }
       | null;
+    let responseOk: boolean;
 
-    setIsExecuting(false);
+    if (targetsLocalHost) {
+      const localResult = await executeRequestInBrowser({
+        method: builder.method,
+        url: builder.url,
+        headers: headersWithCookies,
+        bodyMode: builder.bodyMode,
+        bodyRaw: builder.bodyRaw,
+        bodyForm: builder.bodyForm,
+        auth: effectiveAuth,
+        variableMap,
+      });
 
-    setResultForRequest(requestKey, {
-      ok: Boolean(payload?.ok),
-      status: payload?.status ?? 0,
-      headers: payload?.headers ?? [],
-      body: payload?.body ?? null,
-      durationMs: payload?.durationMs ?? 0,
-      errorCode: payload?.errorCode ?? null,
-      error: payload?.error ?? (response.ok ? null : "Execution failed."),
-    });
+      const response = await apiFetch("/api/tester/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: builder.id,
+          collectionId: builder.collectionId,
+          folderId: builder.folderId,
+          environmentId: activeEnvironment?.id ?? null,
+          method: builder.method,
+          url: localResult.finalUrl,
+          headers: localResult.interpolatedHeaders,
+          bodyMode: localResult.bodyMode,
+          bodyRaw: localResult.persistedBodyRaw,
+          bodyForm: localResult.persistedBodyForm,
+          auth: effectiveAuth,
+          envVariables: variableMap,
+          outcome: {
+            status: localResult.status,
+            headers: localResult.headers,
+            body: localResult.body,
+            durationMs: localResult.durationMs,
+            errorCode: localResult.errorCode,
+            error: localResult.error,
+          },
+        }),
+      });
 
-    if (!response.ok && payload?.error) {
+      payload = await response.json().catch(() => null);
+      responseOk = response.ok;
+    } else {
+      const response = await apiFetch("/api/tester/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: builder.id,
+          collectionId: builder.collectionId,
+          folderId: builder.folderId,
+          environmentId: activeEnvironment?.id ?? null,
+          method: builder.method,
+          url: builder.url,
+          headers: headersWithCookies,
+          bodyMode: builder.bodyMode,
+          bodyRaw: builder.bodyRaw,
+          bodyForm: builder.bodyForm,
+          auth: effectiveAuth,
+          body: builder.bodyRaw,
+        }),
+      });
+
+      payload = await response.json().catch(() => null);
+      responseOk = response.ok;
+    }
+
+    updateTabById(tabId, () => ({
+      isExecuting: false,
+      executeResult: {
+        ok: Boolean(payload?.ok),
+        status: payload?.status ?? 0,
+        headers: payload?.headers ?? [],
+        body: payload?.body ?? null,
+        durationMs: payload?.durationMs ?? 0,
+        errorCode: payload?.errorCode ?? null,
+        error: payload?.error ?? (responseOk ? null : "Execution failed."),
+      },
+    }));
+
+    if (!responseOk && payload?.error) {
       setGlobalError(payload.error);
     }
 
@@ -898,10 +1167,10 @@ export function WorkspaceClient({
   function applyHistoryEntry(entry: HistoryDto) {
     const sanitizedHeaders = stripCookieHeaders(entry.headers);
 
-    setBuilder((previous) => ({
-      ...previous,
+    const nextBuilder: BuilderState = {
       id: null,
       name: `${entry.method} ${entry.url}`,
+      description: "",
       method: entry.method,
       url: entry.url,
       queryParams: parseQueryParamsFromUrl(entry.url),
@@ -915,11 +1184,12 @@ export function WorkspaceClient({
       auth: entry.auth,
       collectionId: entry.collection_id,
       folderId: entry.folder_id,
-    }));
-    setRequestCookies(extractCookiesFromHeaders(entry.headers));
-    setActiveRequestId(null);
-    setRequestEditorTab("docs");
-    setDraftExecuteResult(null);
+    };
+
+    const tab = createRequestTab(nextBuilder, null, extractCookiesFromHeaders(entry.headers));
+    setTabs((previous) => [...previous, tab]);
+    setActiveTabId(tab.tabId);
+    setActiveDetailView(null);
   }
 
   function copyName(name: string): string {
@@ -935,7 +1205,7 @@ export function WorkspaceClient({
     collectionId: string | null,
     parentId: string | null,
   ) {
-    const response = await fetch("/api/documentation/folders", {
+    const response = await apiFetch("/api/documentation/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, collectionId, parentId }),
@@ -971,7 +1241,7 @@ export function WorkspaceClient({
       return;
     }
 
-    const response = await fetch("/api/requests", {
+    const response = await apiFetch("/api/requests", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1002,12 +1272,12 @@ export function WorkspaceClient({
     await loadRequests("all", "all");
 
     if (payload.data) {
-      pickRequest(payload.data);
+      openOrActivateRequestTab(payload.data);
     }
   }
 
   async function renameCollectionWithName(collection: CollectionDto, name: string) {
-    const response = await fetch(`/api/collections/${collection.id}`, {
+    const response = await apiFetch(`/api/collections/${collection.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -1032,7 +1302,7 @@ export function WorkspaceClient({
   }
 
   async function renameFolderWithName(folder: DocumentationFolderDto, name: string) {
-    const response = await fetch(`/api/documentation/folders/${folder.id}`, {
+    const response = await apiFetch(`/api/documentation/folders/${folder.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -1057,7 +1327,7 @@ export function WorkspaceClient({
   }
 
   async function handleUpdateCollectionDescription(collectionId: string, description: string) {
-    const response = await fetch(`/api/collections/${collectionId}`, {
+    const response = await apiFetch(`/api/collections/${collectionId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description }),
@@ -1079,7 +1349,7 @@ export function WorkspaceClient({
   }
 
   async function handleUpdateCollectionAuth(collectionId: string, auth: RequestAuthConfig) {
-    const response = await fetch(`/api/collections/${collectionId}`, {
+    const response = await apiFetch(`/api/collections/${collectionId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ auth }),
@@ -1101,7 +1371,7 @@ export function WorkspaceClient({
   }
 
   async function handleUpdateFolderDescription(folderId: string, description: string) {
-    const response = await fetch(`/api/documentation/folders/${folderId}`, {
+    const response = await apiFetch(`/api/documentation/folders/${folderId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description }),
@@ -1123,7 +1393,7 @@ export function WorkspaceClient({
   }
 
   async function handleUpdateFolderAuth(folderId: string, auth: RequestAuthConfig) {
-    const response = await fetch(`/api/documentation/folders/${folderId}`, {
+    const response = await apiFetch(`/api/documentation/folders/${folderId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ auth }),
@@ -1159,7 +1429,7 @@ export function WorkspaceClient({
 
     await Promise.all(
       childRequests.map((item) =>
-        fetch(`/api/requests/${item.id}`, {
+        apiFetch(`/api/requests/${item.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ auth: inheritAuth }),
@@ -1169,9 +1439,17 @@ export function WorkspaceClient({
 
     await loadRequests("all", "all");
 
-    if (builder.folderId === folderId) {
-      setBuilder((previous) => ({ ...previous, auth: inheritAuth }));
-    }
+    setTabs((previous) =>
+      previous.map((tab) =>
+        tab.builder.folderId === folderId
+          ? {
+              ...tab,
+              builder: { ...tab.builder, auth: inheritAuth },
+              savedSnapshot: { ...tab.savedSnapshot, auth: inheritAuth },
+            }
+          : tab,
+      ),
+    );
   }
 
   function handleNavigateToAuthOwner(owner: AuthOwnerRef) {
@@ -1179,7 +1457,7 @@ export function WorkspaceClient({
   }
 
   async function renameRequestWithName(request: RequestDto, name: string) {
-    const response = await fetch(`/api/requests/${request.id}`, {
+    const response = await apiFetch(`/api/requests/${request.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -1191,9 +1469,17 @@ export function WorkspaceClient({
       return;
     }
 
-    if (builder.id === request.id) {
-      setBuilder((previous) => ({ ...previous, name }));
-    }
+    setTabs((previous) =>
+      previous.map((tab) =>
+        tab.requestId === request.id
+          ? {
+              ...tab,
+              builder: { ...tab.builder, name },
+              savedSnapshot: { ...tab.savedSnapshot, name },
+            }
+          : tab,
+      ),
+    );
 
     setGlobalError(null);
     await loadRequests("all", "all");
@@ -1239,7 +1525,7 @@ export function WorkspaceClient({
   }
 
   async function performDeleteCollection(collection: CollectionDto) {
-    const response = await fetch(`/api/collections/${collection.id}`, { method: "DELETE" });
+    const response = await apiFetch(`/api/collections/${collection.id}`, { method: "DELETE" });
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -1247,9 +1533,12 @@ export function WorkspaceClient({
       return;
     }
 
-    if (builder.collectionId === collection.id) {
-      startNewRequest();
-      setActiveRequestId(null);
+    const remainingTabs = tabs.filter((tab) => tab.builder.collectionId !== collection.id);
+    if (remainingTabs.length !== tabs.length) {
+      setTabs(remainingTabs);
+      if (activeTabId && !remainingTabs.some((tab) => tab.tabId === activeTabId)) {
+        setActiveTabId(remainingTabs[0]?.tabId ?? null);
+      }
     }
 
     if (collectionFilter === collection.id) {
@@ -1262,7 +1551,7 @@ export function WorkspaceClient({
   }
 
   async function performDeleteFolder(folder: DocumentationFolderDto) {
-    const response = await fetch(`/api/documentation/folders/${folder.id}`, {
+    const response = await apiFetch(`/api/documentation/folders/${folder.id}`, {
       method: "DELETE",
     });
 
@@ -1272,9 +1561,17 @@ export function WorkspaceClient({
       return;
     }
 
-    if (builder.folderId === folder.id) {
-      setBuilder((previous) => ({ ...previous, folderId: null }));
-    }
+    setTabs((previous) =>
+      previous.map((tab) =>
+        tab.builder.folderId === folder.id
+          ? {
+              ...tab,
+              builder: { ...tab.builder, folderId: null },
+              savedSnapshot: { ...tab.savedSnapshot, folderId: null },
+            }
+          : tab,
+      ),
+    );
 
     if (folderFilter === folder.id) {
       setFolderFilter("all");
@@ -1285,7 +1582,7 @@ export function WorkspaceClient({
   }
 
   async function performDeleteRequest(request: RequestDto) {
-    const response = await fetch(`/api/requests/${request.id}`, { method: "DELETE" });
+    const response = await apiFetch(`/api/requests/${request.id}`, { method: "DELETE" });
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -1293,9 +1590,9 @@ export function WorkspaceClient({
       return;
     }
 
-    if (activeRequestId === request.id) {
-      setActiveRequestId(null);
-      startNewRequest();
+    const openTab = tabs.find((tab) => tab.requestId === request.id);
+    if (openTab) {
+      closeTab(openTab.tabId);
     }
 
     setGlobalError(null);
@@ -1360,7 +1657,7 @@ export function WorkspaceClient({
       return;
     }
 
-    const response = await fetch("/api/requests", {
+    const response = await apiFetch("/api/requests", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1401,7 +1698,7 @@ export function WorkspaceClient({
     );
 
     for (const item of toDuplicate) {
-      await fetch("/api/requests", {
+      await apiFetch("/api/requests", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1427,7 +1724,7 @@ export function WorkspaceClient({
     targetParentId: string | null,
     nameOverride?: string,
   ) {
-    const response = await fetch("/api/documentation/folders", {
+    const response = await apiFetch("/api/documentation/folders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1471,7 +1768,7 @@ export function WorkspaceClient({
       return;
     }
 
-    const response = await fetch("/api/collections", {
+    const response = await apiFetch("/api/collections", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: copyName(collection.name), description: collection.description }),
@@ -1512,7 +1809,7 @@ export function WorkspaceClient({
   }
 
   async function handleExportWorkspaceJson() {
-    const response = await fetch("/api/workspace/export", { cache: "no-store" });
+    const response = await apiFetch("/api/workspace/export", { cache: "no-store" });
     const payload = (await response.json().catch(() => null)) as
       | {
           data?: unknown;
@@ -1540,7 +1837,7 @@ export function WorkspaceClient({
   }
 
   async function handleExportCollection(collection: CollectionDto) {
-    const response = await fetch(
+    const response = await apiFetch(
       `/api/workspace/export?collectionId=${encodeURIComponent(collection.id)}`,
       { cache: "no-store" },
     );
@@ -1587,7 +1884,7 @@ export function WorkspaceClient({
       const text = await file.text();
       const parsed = JSON.parse(text) as unknown;
 
-      const response = await fetch("/api/workspace/import", {
+      const response = await apiFetch("/api/workspace/import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1631,9 +1928,6 @@ export function WorkspaceClient({
       <TopBar
         userName={session?.user?.name ?? "Unknown User"}
         role={role ?? "Viewer"}
-        environments={environments}
-        selectedEnvironmentId={selectedEnvironmentId}
-        onSelectEnvironment={handleSelectEnvironment}
         workspaces={initialData.workspaces}
         activeWorkspaceId={initialData.activeWorkspaceId}
       />
@@ -1668,6 +1962,10 @@ export function WorkspaceClient({
               setGlobalError={setGlobalError}
             />
           </div>
+        ) : sidebarTab === "ai" ? (
+          <div className="h-full flex-1 overflow-auto">
+            <AiSettingsPanel />
+          </div>
         ) : (
         <div
           ref={workspaceGridRef}
@@ -1680,7 +1978,6 @@ export function WorkspaceClient({
               collections={collections}
               folders={folders}
               requests={requests}
-              organizationName={organization?.name ?? "Workspace"}
               isReadonly={isReadonly}
               collectionFilter={collectionFilter}
               folderFilter={folderFilter}
@@ -1689,10 +1986,10 @@ export function WorkspaceClient({
               expandedFolderIds={expandedFolderIds}
               onToggleCollectionExpanded={toggleCollectionExpanded}
               onToggleFolderExpanded={toggleFolderExpanded}
+              onCollapseCollectionFolders={collapseAllFoldersInCollection}
               onSelectCollection={(id) => void handleSelectCollection(id)}
               onSelectFolder={(id) => void handleSelectFolder(id)}
-              onSelectRequest={pickRequest}
-              onResetFilters={() => void handleResetWorkspaceFilters()}
+              onSelectRequest={openOrActivateRequestTab}
               onOpenContextMenu={openTreeMenu}
               onCreateCollection={() => openNameModal({ mode: "create-collection" })}
               canImportCollection={canAdmin(role)}
@@ -1700,28 +1997,10 @@ export function WorkspaceClient({
             />
           ) : null}
 
-          {sidebarTab === "environments" ? (
-            <EnvironmentsPanel
-              environments={environments}
-              selectedEnvironmentId={selectedEnvironmentId}
-              environmentVariablesDraft={environmentVariablesDraft}
-              setEnvironmentVariablesDraft={setEnvironmentVariablesDraft}
-              newEnvironmentName={newEnvironmentName}
-              setNewEnvironmentName={setNewEnvironmentName}
-              isReadonly={isReadonly}
-              onSelectEnvironment={handleSelectEnvironment}
-              onCreateEnvironment={(event) => void handleCreateEnvironment(event)}
-              onSaveEnvironmentVariables={() => void handleSaveEnvironmentVariables()}
-              onSetDefaultEnvironment={(id) => void handleSetDefaultEnvironment(id)}
-              isCreatingEnvironment={isCreatingEnvironment}
-              isSavingEnvironmentVariables={isSavingEnvironmentVariables}
-              settingDefaultEnvironmentId={settingDefaultEnvironmentId}
-            />
-          ) : null}
-
           {sidebarTab === "history" ? (
             <HistoryPanel
               history={history}
+              users={users}
               historyScope={historyScope}
               onSelectHistoryScope={(scope) => void handleSelectHistoryScope(scope)}
               onApplyHistoryEntry={applyHistoryEntry}
@@ -1754,19 +2033,27 @@ export function WorkspaceClient({
           <span className="w-1 rounded-full bg-[var(--border)] transition-colors group-hover:bg-[var(--primary)]" />
         </div>
 
-        <main className="grid h-full overflow-hidden lg:grid-rows-[1.15fr_1fr]">
+        <main className="grid h-full overflow-hidden lg:grid-rows-[auto_1.15fr_1fr]">
+          <RequestTabBar
+            tabs={tabBarItems}
+            activeTabId={activeTabId}
+            onSelectTab={selectTab}
+            onCloseTab={requestCloseTab}
+            onNewTab={startNewRequest}
+          />
+
           {activeDetailTarget ? (
-            <div className="overflow-hidden p-3">
+            <div className="overflow-hidden lg:row-span-2">
             <CollectionOverviewPanel
               target={activeDetailTarget}
               collections={collections}
               folders={folders}
               requests={requests}
               environments={environments}
-              selectedEnvironmentId={selectedEnvironmentId}
               isReadonly={isReadonly}
               detailTab={detailTab}
               setDetailTab={setDetailTab}
+              onOpenAiSettings={() => setSidebarTab("ai")}
               onUpdateDescription={(value) =>
                 activeDetailTarget.type === "collection"
                   ? handleUpdateCollectionDescription(activeDetailTarget.collection.id, value)
@@ -1778,9 +2065,17 @@ export function WorkspaceClient({
                   : handleUpdateFolderAuth(activeDetailTarget.folder.id, auth)
               }
               onNavigateToOwner={handleNavigateToAuthOwner}
+              isCreatingEnvironment={isCreatingEnvironment}
+              settingActiveEnvironmentId={settingActiveEnvironmentId}
+              isSavingEnvironmentVariables={isSavingEnvironmentVariables}
+              deletingEnvironmentId={deletingEnvironmentId}
+              onCreateEnvironment={(collectionId, name) => void handleCreateEnvironment(collectionId, name)}
+              onSetActiveEnvironment={(id) => void handleSetActiveEnvironment(id)}
+              onSaveEnvironmentVariables={(id, variables) => void handleSaveEnvironmentVariables(id, variables)}
+              onDeleteEnvironment={(id) => void handleDeleteEnvironment(id)}
             />
             </div>
-          ) : (
+          ) : activeTab ? (
             <>
               <RequestEditorPanel
                 builder={builder}
@@ -1802,6 +2097,8 @@ export function WorkspaceClient({
                 scriptDraft={scriptDraft}
                 setScriptDraft={setScriptDraft}
                 environmentVariableKeys={environmentVariableKeys}
+                environments={environments}
+                onSelectEnvironment={(id) => void handleSetActiveEnvironment(id)}
                 onNavigateToAuthOwner={handleNavigateToAuthOwner}
                 onStartNewRequest={startNewRequest}
                 onSaveRequest={() => void handleSaveRequest()}
@@ -1818,6 +2115,10 @@ export function WorkspaceClient({
                 isExecuting={isExecuting}
               />
             </>
+          ) : (
+            <div className="flex h-full items-center justify-center p-6 text-center text-sm text-[var(--muted)]">
+              Select a request from the sidebar or start a new one.
+            </div>
           )}
         </main>
         </div>
@@ -1857,6 +2158,16 @@ export function WorkspaceClient({
         onConfirm={() => void confirmDelete()}
         isConfirming={isDeleteConfirming}
       />
+
+      {unsavedTabCloseId ? (
+        <UnsavedTabCloseModal
+          requestName={tabs.find((tab) => tab.tabId === unsavedTabCloseId)?.builder.name ?? ""}
+          isSaving={tabs.find((tab) => tab.tabId === unsavedTabCloseId)?.isSavingRequest ?? false}
+          onCancel={cancelCloseTabConfirm}
+          onDiscard={discardAndCloseTab}
+          onSave={() => void saveAndCloseTab()}
+        />
+      ) : null}
     </div>
   );
 }

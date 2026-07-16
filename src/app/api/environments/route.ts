@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { Types } from "mongoose";
 import { z } from "zod";
 
 import { canMutate } from "@/lib/auth/rbac";
 import { connectToDatabase } from "@/lib/db/connect";
+import { CollectionModel } from "@/lib/db/models/Collection";
 import { EnvironmentModel } from "@/lib/db/models/Environment";
-import { apiError } from "@/lib/server/api";
+import { apiError, parseObjectId } from "@/lib/server/api";
 import { getTenantContext } from "@/lib/server/auth";
-import { sanitizeVariables, toIsoDate } from "@/lib/server/serialize";
+import { sanitizeVariables, toId, toIsoDate } from "@/lib/server/serialize";
 
 export const runtime = "nodejs";
 
@@ -17,15 +17,27 @@ const environmentVariableSchema = z.object({
 });
 
 const createEnvironmentSchema = z.object({
+  collectionId: z.string().trim().min(1),
   name: z.string().trim().min(1).max(120),
   is_default: z.boolean().optional().default(false),
   variables: z.array(environmentVariableSchema).default([]),
 });
 
-export async function GET() {
+export async function GET(request: Request) {
   const context = await getTenantContext();
   if (!context) {
     return apiError("Unauthorized.", 401);
+  }
+
+  const requestUrl = new URL(request.url);
+  const collectionIdParam = requestUrl.searchParams.get("collectionId");
+  let collectionId: ReturnType<typeof parseObjectId> = null;
+
+  if (collectionIdParam) {
+    collectionId = parseObjectId(collectionIdParam);
+    if (!collectionId) {
+      return apiError("Invalid collection id.", 400);
+    }
   }
 
   await connectToDatabase();
@@ -33,6 +45,7 @@ export async function GET() {
   const environments = await EnvironmentModel.find({
     tenant_id: context.tenantId,
     workspace_id: context.workspaceId,
+    ...(collectionId ? { collection_id: collectionId.toString() } : {}),
   })
     .sort({ is_default: -1, updatedAt: -1 })
     .lean();
@@ -42,6 +55,7 @@ export async function GET() {
       id: env._id.toString(),
       tenant_id: env.tenant_id,
       workspace_id: env.workspace_id.toString(),
+      collection_id: toId(env.collection_id),
       name: env.name,
       is_default: env.is_default,
       variables: sanitizeVariables(env.variables),
@@ -67,11 +81,33 @@ export async function POST(request: Request) {
     return apiError("Invalid environment payload.", 422);
   }
 
+  const collectionId = parseObjectId(parsed.data.collectionId);
+  if (!collectionId) {
+    return apiError("Invalid collection id.", 400);
+  }
+
   await connectToDatabase();
+
+  const collection = await CollectionModel.findOne({
+    _id: collectionId,
+    tenant_id: context.tenantId,
+    workspace_id: context.workspaceId,
+  })
+    .select({ _id: 1 })
+    .lean();
+
+  if (!collection) {
+    return apiError("Collection not found.", 404);
+  }
 
   if (parsed.data.is_default) {
     await EnvironmentModel.updateMany(
-      { tenant_id: context.tenantId, workspace_id: context.workspaceId, is_default: true },
+      {
+        tenant_id: context.tenantId,
+        workspace_id: context.workspaceId,
+        collection_id: collectionId.toString(),
+        is_default: true,
+      },
       { $set: { is_default: false } },
     );
   }
@@ -79,6 +115,7 @@ export async function POST(request: Request) {
   const created = await EnvironmentModel.create({
     tenant_id: context.tenantId,
     workspace_id: context.workspaceId,
+    collection_id: collectionId.toString(),
     name: parsed.data.name,
     is_default: parsed.data.is_default,
     variables: parsed.data.variables,
@@ -90,6 +127,7 @@ export async function POST(request: Request) {
         id: created._id.toString(),
         tenant_id: created.tenant_id,
         workspace_id: created.workspace_id.toString(),
+        collection_id: toId(created.collection_id),
         name: created.name,
         is_default: created.is_default,
         variables: sanitizeVariables(created.variables),

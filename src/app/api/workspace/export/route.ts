@@ -159,6 +159,7 @@ function buildPostmanCollection(
   collectionDescription: string,
   folders: ExportFolder[],
   requests: ExportRequest[],
+  variables: { key: string; value: string }[] = [],
 ): Record<string, unknown> {
   return {
     info: {
@@ -168,6 +169,7 @@ function buildPostmanCollection(
       schema: "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     },
     item: buildPostmanItemTree(null, folders, requests),
+    variable: variables.map((variable) => ({ key: variable.key, value: variable.value })),
   };
 }
 
@@ -226,11 +228,13 @@ export async function GET(request: Request) {
       })
         .sort({ updatedAt: -1 })
         .lean(),
-      collectionObjectId
-        ? Promise.resolve([])
-        : EnvironmentModel.find({ tenant_id: context.tenantId, workspace_id: context.workspaceId })
-            .sort({ is_default: -1, updatedAt: -1 })
-            .lean(),
+      EnvironmentModel.find({
+        tenant_id: context.tenantId,
+        workspace_id: context.workspaceId,
+        ...(collectionObjectId ? { collection_id: collectionObjectId.toString() } : {}),
+      })
+        .sort({ is_default: -1, updatedAt: -1 })
+        .lean(),
     ]);
 
     if (!organization) {
@@ -275,6 +279,7 @@ export async function GET(request: Request) {
 
     if (collectionObjectId) {
       const targetCollection = collections[0];
+      const activeEnvironment = environments.find((item) => item.is_default) ?? environments[0];
 
       return NextResponse.json({
         data: buildPostmanCollection(
@@ -282,6 +287,7 @@ export async function GET(request: Request) {
           targetCollection.description,
           mappedFolders,
           mappedRequests,
+          activeEnvironment?.variables ?? [],
         ),
       });
     }
@@ -299,12 +305,12 @@ export async function GET(request: Request) {
           id: item._id.toString(),
           name: item.name,
           description: item.description,
-          environmentId: item.environment_id?.toString() ?? null,
         })),
         folders: mappedFolders,
         requests: mappedRequests.map((item) => ({ ...item, body: item.bodyRaw })),
         environments: environments.map((item) => ({
           id: item._id.toString(),
+          collectionId: item.collection_id.toString(),
           name: item.name,
           is_default: item.is_default,
           variables: item.variables,

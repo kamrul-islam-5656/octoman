@@ -51,6 +51,22 @@ export type NameModalState =
 export type RequestEditorTabId = "params" | "docs" | "auth" | "headers" | "body" | "scripts";
 export type ResponseTabId = "body" | "headers" | "cookies";
 
+export interface RequestTabState {
+  tabId: string;
+  requestId: string | null;
+  builder: BuilderState;
+  savedSnapshot: BuilderState;
+  requestEditorTab: RequestEditorTabId;
+  requestCookies: KeyValuePair[];
+  showCookiesEditor: boolean;
+  responseTab: ResponseTabId;
+  executeResult: ExecuteResultState | null;
+  isExecuting: boolean;
+  isSavingRequest: boolean;
+  isDeletingRequest: boolean;
+  scriptDraft: string;
+}
+
 export interface DeleteConfirmState {
   type: "collection" | "folder" | "request";
   title: string;

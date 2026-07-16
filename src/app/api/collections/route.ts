@@ -5,8 +5,7 @@ import { z } from "zod";
 import { canMutate } from "@/lib/auth/rbac";
 import { connectToDatabase } from "@/lib/db/connect";
 import { CollectionDocument, CollectionModel } from "@/lib/db/models/Collection";
-import { EnvironmentModel } from "@/lib/db/models/Environment";
-import { apiError, apiException, parseObjectId, readJsonBody } from "@/lib/server/api";
+import { apiError, apiException, readJsonBody } from "@/lib/server/api";
 import { getTenantContext } from "@/lib/server/auth";
 import { createDefaultAuthConfig, normalizeAuthConfig, requestAuthSchema } from "@/lib/server/request-contract";
 import { toId, toIsoDate } from "@/lib/server/serialize";
@@ -16,7 +15,6 @@ export const runtime = "nodejs";
 const createCollectionSchema = z.object({
   name: z.string().trim().min(1).max(150),
   description: z.string().trim().max(1000).default(""),
-  environmentId: z.string().trim().optional().nullable(),
   auth: requestAuthSchema.optional(),
 });
 
@@ -43,7 +41,6 @@ export async function GET() {
         workspace_id: toId(collection.workspace_id),
         name: collection.name,
         description: collection.description,
-        environment_id: collection.environment_id ? toId(collection.environment_id) : null,
         auth: normalizeAuthConfig(collection.auth),
         created_by: toId(collection.created_by),
         sort_order: collection.sort_order ?? 0,
@@ -79,26 +76,7 @@ export async function POST(request: Request) {
       return apiError("Collection authorization cannot be set to inherit.", 422);
     }
 
-    const environmentId = parseObjectId(parsed.data.environmentId ?? null);
-    if (parsed.data.environmentId && !environmentId) {
-      return apiError("Invalid environment id.", 400);
-    }
-
     await connectToDatabase();
-
-    if (environmentId) {
-      const environment = await EnvironmentModel.findOne({
-        _id: environmentId.toString(),
-        tenant_id: context.tenantId,
-        workspace_id: context.workspaceId,
-      })
-        .select({ _id: 1 })
-        .lean();
-
-      if (!environment) {
-        return apiError("Selected environment was not found.", 404);
-      }
-    }
 
     const created = await CollectionModel.create({
       _id: new Types.ObjectId(),
@@ -106,7 +84,6 @@ export async function POST(request: Request) {
       workspace_id: context.workspaceId,
       name: parsed.data.name,
       description: parsed.data.description,
-      environment_id: environmentId,
       auth: (parsed.data.auth
         ? normalizeAuthConfig(parsed.data.auth)
         : createDefaultAuthConfig()) as CollectionDocument["auth"],
@@ -121,7 +98,6 @@ export async function POST(request: Request) {
           workspace_id: toId(created.workspace_id),
           name: created.name,
           description: created.description,
-          environment_id: created.environment_id?.toString() ?? null,
           auth: normalizeAuthConfig(created.auth),
           created_by: created.created_by.toString(),
           sort_order: created.sort_order ?? 0,

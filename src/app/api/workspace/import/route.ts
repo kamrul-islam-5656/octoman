@@ -33,7 +33,6 @@ const importCollectionSchema = z.object({
   id: z.string().trim().optional(),
   name: z.string().trim().min(1).max(150),
   description: z.string().trim().max(1000).default(""),
-  environmentId: z.string().trim().optional().nullable(),
 });
 
 const importFolderSchema = z.object({
@@ -62,6 +61,7 @@ const importRequestSchema = z.object({
 
 const importEnvironmentSchema = z.object({
   id: z.string().trim().optional(),
+  collectionId: z.string().trim().optional().nullable(),
   name: z.string().trim().min(1).max(120),
   is_default: z.boolean().optional().default(false),
   variables: z
@@ -411,7 +411,6 @@ function toImportDataFromSharedPayload(source: Record<string, unknown>): ImportD
       id: collectionId,
       name: collectionName,
       description: readDescription(collectionRecord.description),
-      environmentId: null,
     },
   ];
 
@@ -463,6 +462,7 @@ function toImportDataFromSharedPayload(source: Record<string, unknown>): ImportD
         .filter(isRecord)
         .map((environment, index) => ({
           id: readText(environment.id) || `env-${index + 1}-${randomUUID()}`,
+          collectionId: readText(environment.collectionId ?? environment.collection_id) || collectionId,
           name: readText(environment.name) || `Environment ${index + 1}`,
           is_default: environment.is_default === true,
           variables: normalizePostmanVariables(environment.variables),
@@ -489,14 +489,13 @@ function toImportDataFromPostman(source: Record<string, unknown>): ImportData | 
 
   const variables = normalizePostmanVariables(source.variable);
   const environments: ImportEnvironment[] = [];
-  let environmentId: string | null = null;
 
   if (variables.length > 0) {
-    environmentId = `env-${randomUUID()}`;
     environments.push({
-      id: environmentId,
+      id: `env-${randomUUID()}`,
+      collectionId,
       name: `${collectionName} Environment`,
-      is_default: false,
+      is_default: true,
       variables,
     });
   }
@@ -506,7 +505,6 @@ function toImportDataFromPostman(source: Record<string, unknown>): ImportData | 
       id: collectionId,
       name: collectionName,
       description: collectionDescription,
-      environmentId,
     },
   ];
 
@@ -679,38 +677,11 @@ export async function POST(request: Request) {
     const collectionIdMap = new Map<string, Types.ObjectId>();
     const folderIdMap = new Map<string, Types.ObjectId>();
     const folderCollectionMap = new Map<string, Types.ObjectId | null>();
-    const environmentIdMap = new Map<string, Types.ObjectId>();
-
-    let defaultEnvironmentAssigned = existingEnvironments.some((item) => item.is_default);
-
-    for (const environment of parsedData.data.environments) {
-      const newId = new Types.ObjectId();
-      const sourceId = environment.id ?? newId.toString();
-      const name = ensureUniqueName(environment.name, usedEnvironmentNames);
-      const shouldBeDefault = environment.is_default && !defaultEnvironmentAssigned;
-
-      if (shouldBeDefault) {
-        defaultEnvironmentAssigned = true;
-      }
-
-      await EnvironmentModel.create({
-        tenant_id: context.tenantId,
-        workspace_id: context.workspaceId,
-        name,
-        is_default: shouldBeDefault,
-        variables: environment.variables,
-      });
-
-      environmentIdMap.set(sourceId, newId);
-    }
 
     for (const collection of parsedData.data.collections) {
       const newId = new Types.ObjectId();
       const sourceId = collection.id ?? newId.toString();
       const name = ensureUniqueName(collection.name, usedCollectionNames);
-      const mappedEnvironmentId = collection.environmentId
-        ? environmentIdMap.get(collection.environmentId) ?? null
-        : null;
 
       await CollectionModel.create({
         _id: newId,
@@ -718,11 +689,43 @@ export async function POST(request: Request) {
         workspace_id: context.workspaceId,
         name,
         description: collection.description,
-        environment_id: mappedEnvironmentId,
         created_by: new Types.ObjectId(context.userId),
       });
 
       collectionIdMap.set(sourceId, newId);
+    }
+
+    // Environments are owned by exactly one collection, so each import needs its
+    // own collection to attach to; entries that can't be mapped are dropped rather
+    // than created orphaned (the schema requires collection_id).
+    const fallbackCollectionId = collectionIdMap.size === 1 ? [...collectionIdMap.values()][0] : null;
+    const defaultAssignedByCollectionId = new Set<string>();
+
+    for (const environment of parsedData.data.environments) {
+      const mappedCollectionId =
+        (environment.collectionId ? collectionIdMap.get(environment.collectionId) : undefined) ??
+        fallbackCollectionId;
+
+      if (!mappedCollectionId) {
+        continue;
+      }
+
+      const collectionKey = mappedCollectionId.toString();
+      const name = ensureUniqueName(environment.name, usedEnvironmentNames);
+      const shouldBeDefault = environment.is_default && !defaultAssignedByCollectionId.has(collectionKey);
+
+      if (shouldBeDefault) {
+        defaultAssignedByCollectionId.add(collectionKey);
+      }
+
+      await EnvironmentModel.create({
+        tenant_id: context.tenantId,
+        workspace_id: context.workspaceId,
+        collection_id: collectionKey,
+        name,
+        is_default: shouldBeDefault,
+        variables: environment.variables,
+      });
     }
 
     const pendingFolders = [...parsedData.data.folders];

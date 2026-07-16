@@ -11,7 +11,7 @@ import {
   readJsonBody,
 } from "@/lib/server/api";
 import { getTenantContext } from "@/lib/server/auth";
-import { sanitizeVariables, toIsoDate } from "@/lib/server/serialize";
+import { sanitizeVariables, toId, toIsoDate } from "@/lib/server/serialize";
 
 export const runtime = "nodejs";
 
@@ -56,10 +56,23 @@ export async function PATCH(request: Request, context: RouteContext) {
     await connectToDatabase();
 
     if (parsed.data.is_default) {
+      const target = await EnvironmentModel.findOne({
+        _id: environmentId.toString(),
+        tenant_id: session.tenantId,
+        workspace_id: session.workspaceId,
+      })
+        .select({ collection_id: 1 })
+        .lean();
+
+      if (!target) {
+        return apiError("Environment not found.", 404);
+      }
+
       await EnvironmentModel.updateMany(
         {
           tenant_id: session.tenantId,
           workspace_id: session.workspaceId,
+          collection_id: target.collection_id,
           _id: { $ne: environmentId.toString() },
           is_default: true,
         },
@@ -90,6 +103,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         id: updated._id.toString(),
         tenant_id: updated.tenant_id,
         workspace_id: updated.workspace_id.toString(),
+        collection_id: toId(updated.collection_id),
         name: updated.name,
         is_default: updated.is_default,
         variables: sanitizeVariables(updated.variables),

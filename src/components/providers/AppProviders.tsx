@@ -3,6 +3,7 @@
 import { SessionProvider } from "next-auth/react";
 
 import { AccentColorProvider } from "./AccentColorProvider";
+import { ApiActivityProvider } from "./ApiActivityProvider";
 import { ThemeProvider } from "./ThemeProvider";
 
 interface AppProvidersProps {
@@ -13,7 +14,9 @@ export function AppProviders({ children }: AppProvidersProps) {
   return (
     <SessionProvider>
       <ThemeProvider>
-        <AccentColorProvider>{children}</AccentColorProvider>
+        <AccentColorProvider>
+          <ApiActivityProvider>{children}</ApiActivityProvider>
+        </AccentColorProvider>
       </ThemeProvider>
     </SessionProvider>
   );

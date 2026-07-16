@@ -18,6 +18,11 @@ export function apiError(message: string, status = 400): NextResponse {
 
 export function apiException(error: unknown): NextResponse {
   console.error("API Exception:", error);
+
+  if (error instanceof ApiHttpError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+  }
+
   const message = error instanceof Error ? error.message : "An unexpected error occurred";
   return NextResponse.json({ error: message }, { status: 500 });
 }

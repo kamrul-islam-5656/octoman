@@ -88,13 +88,51 @@ export interface CollectionDto {
   workspace_id: string;
   name: string;
   description: string;
-  environment_id: string | null;
   auth: RequestAuthConfig;
   created_by: string;
   sort_order: number;
   published: boolean;
   publish_slug: string;
   createdAt: string;
+  updatedAt: string;
+}
+
+export type DocumentationFormat = "markdown" | "html";
+
+export interface CollectionDocumentationDto {
+  id: string;
+  collection_id: string;
+  format: DocumentationFormat;
+  project_description: string;
+  content: string;
+  generated_by: string;
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiSettingsDto {
+  enabled: boolean;
+  hasApiKey: boolean;
+  maskedApiKey: string | null;
+  model: string | null;
+}
+
+export interface AiModelDto {
+  id: string;
+}
+
+export interface AiUsageSnapshotDto {
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requestsLimit: string | null;
+  requestsRemaining: string | null;
+  requestsReset: string | null;
+  tokensLimit: string | null;
+  tokensRemaining: string | null;
+  tokensReset: string | null;
   updatedAt: string;
 }
 
@@ -156,6 +194,7 @@ export interface EnvironmentDto {
   id: string;
   tenant_id: string;
   workspace_id: string;
+  collection_id: string;
   name: string;
   is_default: boolean;
   variables: EnvironmentVariable[];
@@ -392,56 +431,6 @@ export interface RunResultItem {
 /*  UI State types (used across workspace components)                 */
 /* ------------------------------------------------------------------ */
 
-export interface BuilderState {
-  id: string | null;
-  name: string;
-  description: string;
-  request_type: RequestType;
-  method: HttpMethod;
-  url: string;
-  query_params: QueryParam[];
-  headers: KeyValuePair[];
-  bodyMode: RequestBodyMode;
-  bodyRawLanguage: RawBodyLanguage;
-  bodyRaw: string;
-  bodyForm: KeyValuePair[];
-  auth: RequestAuthConfig;
-  preRequestScript: string;
-  testScript: string;
-  graphqlQuery: string;
-  graphqlVariables: string;
-  collectionId: string | null;
-  folderId: string | null;
-  sort_order: number;
-  _dirty: boolean;
-}
-
-export interface TabState {
-  id: string;
-  requestId: string | null;
-  builder: BuilderState;
-  responseViewTab: ResponseViewTab;
-  executeResult: ExecuteResultState | null;
-  testResults: TestResult[];
-  consoleOutput: string[];
-  isExecuting: boolean;
-}
-
-export interface ExecuteResultState {
-  ok: boolean;
-  status: number;
-  headers: KeyValuePair[];
-  body: unknown;
-  durationMs: number;
-  errorCode: string | null;
-  error?: string | null;
-  testResults: TestResult[];
-  timing: TimingPhases | null;
-}
-
-export type SidebarTab = "collections" | "environments" | "history" | "search";
-export type RequestEditorTab = "params" | "auth" | "headers" | "body" | "pre-request" | "tests" | "docs";
-export type ResponseViewTab = "body" | "headers" | "cookies" | "test-results" | "timeline";
 export type SettingsTab = "organization" | "users";
 export type ToastType = "success" | "error" | "info" | "warning";
 

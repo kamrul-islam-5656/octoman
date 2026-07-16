@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { Types } from "mongoose";
 import { z } from "zod";
 
 import { canMutate } from "@/lib/auth/rbac";
@@ -23,7 +22,6 @@ export const runtime = "nodejs";
 const updateCollectionSchema = z.object({
   name: z.string().trim().min(1).max(150).optional(),
   description: z.string().trim().max(1000).optional(),
-  environmentId: z.string().trim().optional().nullable(),
   auth: requestAuthSchema.optional(),
 });
 
@@ -61,7 +59,6 @@ export async function PATCH(request: Request, context: RouteContext) {
     const updatePayload: {
       name?: string;
       description?: string;
-      environment_id?: Types.ObjectId | null;
       auth?: ReturnType<typeof normalizeAuthConfig>;
     } = {};
 
@@ -78,29 +75,6 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     await connectToDatabase();
-
-    if (Object.prototype.hasOwnProperty.call(parsed.data, "environmentId")) {
-      const environmentId = parseObjectId(parsed.data.environmentId ?? null);
-      if (parsed.data.environmentId && !environmentId) {
-        return apiError("Invalid environment id.", 400);
-      }
-
-      if (environmentId) {
-        const environment = await EnvironmentModel.findOne({
-          _id: environmentId.toString(),
-          tenant_id: session.tenantId,
-          workspace_id: session.workspaceId,
-        })
-          .select({ _id: 1 })
-          .lean();
-
-        if (!environment) {
-          return apiError("Selected environment was not found.", 404);
-        }
-      }
-
-      updatePayload.environment_id = environmentId;
-    }
 
     if (Object.keys(updatePayload).length === 0) {
       return apiError("Invalid update payload.", 422);
@@ -131,7 +105,6 @@ export async function PATCH(request: Request, context: RouteContext) {
         workspace_id: toId(updated.workspace_id),
         name: updated.name,
         description: updated.description,
-        environment_id: updated.environment_id?.toString() ?? null,
         auth: normalizeAuthConfig(updated.auth),
         created_by: updated.created_by.toString(),
         sort_order: updated.sort_order ?? 0,
@@ -198,6 +171,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
           { collection_id: collectionId },
           ...(folderIds.length > 0 ? [{ folder_id: { $in: folderIds } }] : []),
         ],
+      }),
+      EnvironmentModel.deleteMany({
+        tenant_id: session.tenantId,
+        workspace_id: session.workspaceId,
+        collection_id: collectionId.toString(),
       }),
     ]);
 

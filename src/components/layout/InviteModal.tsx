@@ -6,6 +6,7 @@ import { Check, Copy, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useApiFetch } from "@/components/providers/ApiActivityProvider";
 import { WorkspaceRole } from "@/types";
 
 interface InviteModalProps {
@@ -22,6 +23,7 @@ export function InviteModal({ workspaceId, workspaceName, workspaceRole, onClose
   const [error, setError] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const apiFetch = useApiFetch();
 
   const invitableRoles: ("Admin" | "Member")[] = workspaceRole === "Owner" ? ["Admin", "Member"] : ["Member"];
 
@@ -30,7 +32,7 @@ export function InviteModal({ workspaceId, workspaceName, workspaceRole, onClose
     setIsSubmitting(true);
     setError(null);
 
-    const response = await fetch(`/api/workspaces/${workspaceId}/invitations`, {
+    const response = await apiFetch(`/api/workspaces/${workspaceId}/invitations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: email.trim(), role }),
