@@ -5,7 +5,7 @@ import { useSession } from "next-auth/react";
 
 import { TopBar } from "@/components/layout/TopBar";
 import { useApiFetch } from "@/components/providers/ApiActivityProvider";
-import { executeRequestInBrowser, isLocalOrPrivateHost } from "@/lib/client/request-runner";
+import { executeRequestInBrowser, isExtensionAvailable, isLocalOrPrivateHost } from "@/lib/client/request-runner";
 import { interpolateString, variablesToMap } from "@/lib/server/interpolate";
 import {
   AdminUserDto,
@@ -25,6 +25,7 @@ import { AiSettingsPanel } from "./workspace/AiSettingsPanel";
 import { CollectionOverviewPanel, DetailTabId, DetailViewTarget } from "./workspace/CollectionOverviewPanel";
 import { CollectionsTree } from "./workspace/CollectionsTree";
 import { DeleteConfirmModal } from "./workspace/DeleteConfirmModal";
+import { ExtensionPromptModal } from "./workspace/ExtensionPromptModal";
 import { UnsavedTabCloseModal } from "./workspace/UnsavedTabCloseModal";
 import { HistoryPanel } from "./workspace/HistoryPanel";
 import { NameModal } from "./workspace/NameModal";
@@ -328,6 +329,8 @@ export function WorkspaceClient({
   }
 
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [showExtensionPrompt, setShowExtensionPrompt] = useState(false);
+  const hasPromptedExtensionInstallRef = useRef(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isCreatingEnvironment, setIsCreatingEnvironment] = useState(false);
   const [isSavingEnvironmentVariables, setIsSavingEnvironmentVariables] = useState(false);
@@ -442,6 +445,11 @@ export function WorkspaceClient({
   function closeNameModal() {
     setNameModal(null);
     setNameModalValue("");
+  }
+
+  function dismissExtensionPrompt() {
+    setShowExtensionPrompt(false);
+    window.localStorage.setItem("octoman-extension-prompt-dismissed", "1");
   }
 
   const [deleteConfirm, setDeleteConfirm] = useState<DeleteConfirmState | null>(null);
@@ -1075,6 +1083,19 @@ export function WorkspaceClient({
         }
       | null;
     let responseOk: boolean;
+
+    if (
+      targetsLocalHost &&
+      !hasPromptedExtensionInstallRef.current &&
+      typeof window !== "undefined" &&
+      window.localStorage.getItem("octoman-extension-prompt-dismissed") !== "1"
+    ) {
+      const extensionAvailable = await isExtensionAvailable();
+      if (!extensionAvailable) {
+        hasPromptedExtensionInstallRef.current = true;
+        setShowExtensionPrompt(true);
+      }
+    }
 
     if (targetsLocalHost) {
       const localResult = await executeRequestInBrowser({
@@ -2151,6 +2172,8 @@ export function WorkspaceClient({
         onClose={closeNameModal}
         isSubmitting={isNameModalSubmitting}
       />
+
+      <ExtensionPromptModal open={showExtensionPrompt} onDismiss={dismissExtensionPrompt} />
 
       <DeleteConfirmModal
         deleteConfirm={deleteConfirm}
