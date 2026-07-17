@@ -54,6 +54,117 @@ export async function isLocalAgentAvailable(): Promise<boolean> {
   }
 }
 
+interface ExtensionExecuteResult {
+  status: number | null;
+  headers: { key: string; value: string }[];
+  body: string | null;
+  durationMs: number;
+  error: string | null;
+}
+
+let extensionDetected = false;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || !event.data || event.data.source !== "octoman-extension") {
+      return;
+    }
+    if (event.data.type === "OCTOMAN_READY" || event.data.type === "OCTOMAN_PONG") {
+      extensionDetected = true;
+    }
+  });
+}
+
+const EXTENSION_PING_TIMEOUT_MS = 300;
+
+/**
+ * Checks whether the Octoman browser extension (extension/) is installed.
+ * When available, it's preferred over the local agent since there's no
+ * separate process to keep running — the extension's background script
+ * fetches directly, bypassing CORS the same way the agent does.
+ */
+export async function isExtensionAvailable(): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  if (extensionDetected) {
+    return true;
+  }
+
+  return new Promise((resolve) => {
+    function handleMessage(event: MessageEvent) {
+      if (event.source !== window || !event.data || event.data.source !== "octoman-extension") {
+        return;
+      }
+      if (event.data.type === "OCTOMAN_READY" || event.data.type === "OCTOMAN_PONG") {
+        extensionDetected = true;
+        window.removeEventListener("message", handleMessage);
+        clearTimeout(timeoutHandle);
+        resolve(true);
+      }
+    }
+
+    const timeoutHandle = setTimeout(() => {
+      window.removeEventListener("message", handleMessage);
+      resolve(false);
+    }, EXTENSION_PING_TIMEOUT_MS);
+
+    window.addEventListener("message", handleMessage);
+    window.postMessage({ source: "octoman-page", type: "OCTOMAN_PING" }, "*");
+  });
+}
+
+function executeViaExtension(
+  method: HttpMethod,
+  built: { finalUrl: string; headersRecord: Record<string, string>; bodyMode: RequestBodyMode; persistedBodyRaw: string; persistedBodyForm: KeyValuePair[] },
+  timeoutMs: number,
+): Promise<ExtensionExecuteResult> {
+  return new Promise((resolve) => {
+    const requestId = `octoman-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    function handleMessage(event: MessageEvent) {
+      if (
+        event.source !== window ||
+        !event.data ||
+        event.data.source !== "octoman-extension" ||
+        event.data.type !== "OCTOMAN_EXECUTE_RESULT" ||
+        event.data.requestId !== requestId
+      ) {
+        return;
+      }
+
+      window.removeEventListener("message", handleMessage);
+      clearTimeout(timeoutHandle);
+      resolve(event.data.result);
+    }
+
+    const timeoutHandle = setTimeout(() => {
+      window.removeEventListener("message", handleMessage);
+      resolve({ status: null, headers: [], body: null, durationMs: 0, error: "Extension did not respond in time." });
+    }, timeoutMs + 2000);
+
+    window.addEventListener("message", handleMessage);
+    window.postMessage(
+      {
+        source: "octoman-page",
+        type: "OCTOMAN_EXECUTE",
+        requestId,
+        payload: {
+          method,
+          url: built.finalUrl,
+          headers: built.headersRecord,
+          bodyMode: built.bodyMode,
+          bodyRaw: built.persistedBodyRaw,
+          bodyForm: built.persistedBodyForm,
+          timeoutMs,
+        },
+      },
+      "*",
+    );
+  });
+}
+
 function toBase64(value: string): string {
   return window.btoa(unescape(encodeURIComponent(value)));
 }
@@ -171,7 +282,7 @@ export interface LocalExecutionResult {
   durationMs: number;
   errorCode: string | null;
   error: string | null;
-  ranViaAgent: boolean;
+  transport: "extension" | "agent" | "browser";
 }
 
 interface BuiltLocalRequest {
@@ -369,6 +480,42 @@ async function runViaLocalAgent(
   }
 }
 
+async function runViaExtension(
+  built: BuiltLocalRequest,
+  method: HttpMethod,
+  timeoutMs: number,
+): Promise<{ status: number | null; headers: { key: string; value: string }[]; body: unknown; durationMs: number; errorCode: string | null; error: string | null } | null> {
+  const available = await isExtensionAvailable();
+  if (!available) {
+    return null;
+  }
+
+  const result = await executeViaExtension(method, built, timeoutMs);
+
+  if (result.error) {
+    return {
+      status: null,
+      headers: [],
+      body: null,
+      durationMs: result.durationMs,
+      errorCode: result.error.toLowerCase().includes("timed out") ? "EXTERNAL_TIMEOUT" : "EXTERNAL_CONNECTION_REFUSED",
+      error: result.error,
+    };
+  }
+
+  const contentType = result.headers.find((header) => header.key.toLowerCase() === "content-type")?.value ?? "";
+  const parsed = parseResponseBody(result.body ?? "", contentType);
+
+  return {
+    status: result.status,
+    headers: result.headers,
+    body: parsed.body,
+    durationMs: result.durationMs,
+    errorCode: parsed.errorCode,
+    error: null,
+  };
+}
+
 export async function executeRequestInBrowser(params: LocalExecutionParams): Promise<LocalExecutionResult> {
   const built = buildLocalRequest(params);
   const timeoutMs = params.timeoutMs ?? 30000;
@@ -386,14 +533,21 @@ export async function executeRequestInBrowser(params: LocalExecutionParams): Pro
       durationMs: 0,
       errorCode: "INVALID_JSON_BODY",
       error: built.invalidJsonError,
-      ranViaAgent: false,
+      transport: "browser",
     };
   }
 
-  const agentAvailable = await isLocalAgentAvailable();
-  const outcome = agentAvailable
-    ? await runViaLocalAgent(built, params.method, timeoutMs)
-    : null;
+  let transport: "extension" | "agent" | "browser" = "browser";
+  let outcome = await runViaExtension(built, params.method, timeoutMs);
+  if (outcome) {
+    transport = "extension";
+  } else {
+    const agentAvailable = await isLocalAgentAvailable();
+    outcome = agentAvailable ? await runViaLocalAgent(built, params.method, timeoutMs) : null;
+    if (outcome) {
+      transport = "agent";
+    }
+  }
 
   const finalOutcome = outcome ?? (await runViaDirectFetch(built, params.method, timeoutMs));
 
@@ -409,6 +563,6 @@ export async function executeRequestInBrowser(params: LocalExecutionParams): Pro
     durationMs: finalOutcome.durationMs,
     errorCode: finalOutcome.errorCode,
     error: finalOutcome.error,
-    ranViaAgent: outcome !== null,
+    transport,
   };
 }
