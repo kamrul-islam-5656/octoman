@@ -27,12 +27,12 @@ export function ExtensionPromptModal({ open, onDismiss }: ExtensionPromptModalPr
           </p>
 
           <ol className="list-decimal space-y-1 pl-5">
+            <li>Download the extension package below.</li>
+            <li>Unzip it to a folder you&apos;ll keep (don&apos;t delete it afterwards).</li>
             <li>
-              Open <code className="rounded bg-[var(--surface-hover)] px-1 py-0.5">chrome://extensions</code> (or{" "}
-              <code className="rounded bg-[var(--surface-hover)] px-1 py-0.5">edge://extensions</code> in Edge).
+              In Chrome or Edge, open the extensions page, enable Developer mode, and load the unzipped
+              folder.
             </li>
-            <li>Turn on Developer mode (top-right toggle).</li>
-            <li>Click Load unpacked and select this project&apos;s extension folder.</li>
             <li>Reload this tab — the extension stays active from then on.</li>
           </ol>
 
@@ -40,8 +40,13 @@ export function ExtensionPromptModal({ open, onDismiss }: ExtensionPromptModalPr
         </div>
 
         <div className="mt-4 flex justify-end gap-2">
-          <Button type="button" onClick={onDismiss}>
-            Got it
+          <Button type="button" variant="outline" onClick={onDismiss}>
+            Not now
+          </Button>
+          <Button asChild>
+            <a href="/downloads/octoman-local-request-helper.zip" download>
+              Download extension
+            </a>
           </Button>
         </div>
       </DialogContent>
