@@ -23,7 +23,7 @@ window.addEventListener("message", (event) => {
     const { requestId, payload } = event.data;
     console.log("Octoman extension: executing request", payload.method, payload.url);
 
-    chrome.runtime.sendMessage({ type: "OCTOMAN_EXECUTE", payload }, (result) => {
+    const respond = (result) => {
       window.postMessage(
         {
           source: "octoman-extension",
@@ -33,7 +33,27 @@ window.addEventListener("message", (event) => {
         },
         "*",
       );
-    });
+    };
+
+    // chrome.runtime becomes invalid when the extension is reloaded/updated
+    // while this content script is still injected in an existing page.
+    // Calling sendMessage in that state throws synchronously, so guard it.
+    if (!chrome.runtime?.id) {
+      respond({ status: null, headers: [], body: null, durationMs: 0, error: "Extension was reloaded. Please refresh the page." });
+      return;
+    }
+
+    try {
+      chrome.runtime.sendMessage({ type: "OCTOMAN_EXECUTE", payload }, (result) => {
+        if (chrome.runtime.lastError) {
+          respond({ status: null, headers: [], body: null, durationMs: 0, error: chrome.runtime.lastError.message });
+          return;
+        }
+        respond(result);
+      });
+    } catch (err) {
+      respond({ status: null, headers: [], body: null, durationMs: 0, error: "Extension was reloaded. Please refresh the page." });
+    }
   }
 });
 
